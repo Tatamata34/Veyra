@@ -1,0 +1,1771 @@
+import os
+import re
+from datetime import datetime, timedelta
+from urllib.parse import quote
+import json
+import threading
+import time
+import secrets
+import requests
+
+from dotenv import load_dotenv
+from flask import Flask, render_template, redirect, url_for, request, flash, session, has_app_context, abort
+from flask_sqlalchemy import SQLAlchemy
+from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
+from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.utils import secure_filename
+
+load_dotenv()
+
+app = Flask(__name__, template_folder="app/templates", static_folder="app/static")
+app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "dev-change-me")
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_SECURE"] = os.getenv("COOKIE_SECURE", "0") == "1"
+app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=12)
+app.config["SQLALCHEMY_DATABASE_URI"] = os.getenv("DATABASE_URL", "sqlite:///nox_store.db")
+app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024
+UPLOAD_DIR = os.path.join(app.static_folder, "uploads")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+db = SQLAlchemy(app)
+
+def csrf_token():
+    token = session.get("csrf_token")
+    if not token:
+        token = secrets.token_urlsafe(32)
+        session["csrf_token"] = token
+    return token
+
+@app.context_processor
+def inject_security():
+    return {"csrf_token": csrf_token()}
+
+@app.before_request
+def security_guard():
+    session.permanent = True
+    if request.method == "POST":
+        expected = session.get("csrf_token")
+        supplied = request.form.get("csrf_token") or request.headers.get("X-CSRF-Token")
+        if not expected or not supplied or not secrets.compare_digest(expected, supplied):
+            abort(400, description="Invalid CSRF token")
+
+login_manager = LoginManager(app)
+login_manager.login_view = "login"
+
+class User(UserMixin, db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(40), unique=True, nullable=False)
+    email = db.Column(db.String(160), unique=True, nullable=False)
+    password_hash = db.Column(db.String(255), nullable=False)
+    is_admin = db.Column(db.Boolean, default=False)
+    telegram_id = db.Column(db.String(64), unique=True, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class Category(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(80), unique=True, nullable=False)
+    slug = db.Column(db.String(80), unique=True, nullable=False)
+
+class Product(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(120), nullable=False)
+    slug = db.Column(db.String(120), unique=True, nullable=False)
+    description = db.Column(db.Text, default="")
+    image_url = db.Column(db.String(500), default="")
+    category_id = db.Column(db.Integer, db.ForeignKey("category.id"), nullable=False)
+    active = db.Column(db.Boolean, default=True)
+    featured = db.Column(db.Boolean, default=False)
+    category = db.relationship("Category", backref="products")
+    plans = db.relationship("Plan", backref="product", cascade="all, delete-orphan")
+
+class Plan(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    product_id = db.Column(db.Integer, db.ForeignKey("product.id"), nullable=False)
+    name = db.Column(db.String(50), nullable=False)
+    months = db.Column(db.Integer, nullable=False)
+    price = db.Column(db.Float, nullable=False)
+    sale_price = db.Column(db.Float, nullable=True)
+    cost_price = db.Column(db.Float, nullable=False, default=0.0)
+    active = db.Column(db.Boolean, default=True)
+
+
+class Coupon(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    code = db.Column(db.String(40), unique=True, nullable=False)
+    discount_percent = db.Column(db.Float, default=0.0)
+    discount_fixed = db.Column(db.Float, default=0.0)
+    max_uses = db.Column(db.Integer, default=0)
+    used_count = db.Column(db.Integer, default=0)
+    expires_at = db.Column(db.DateTime, nullable=True)
+    active = db.Column(db.Boolean, default=True)
+
+class CouponUsage(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    coupon_id = db.Column(db.Integer, db.ForeignKey("coupon.id"), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    order_id = db.Column(db.Integer, db.ForeignKey("order.id"), nullable=True)
+    used_at = db.Column(db.DateTime, default=datetime.utcnow)
+    __table_args__ = (db.UniqueConstraint("coupon_id", "user_id", name="uq_coupon_user"),)
+
+class Wishlist(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    product_id = db.Column(db.Integer, db.ForeignKey("product.id"), nullable=False)
+    __table_args__ = (db.UniqueConstraint("user_id", "product_id", name="uq_wishlist_user_product"),)
+    product = db.relationship("Product")
+
+class Review(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    product_id = db.Column(db.Integer, db.ForeignKey("product.id"), nullable=False)
+    rating = db.Column(db.Integer, nullable=False)
+    text = db.Column(db.Text, default="")
+    approved = db.Column(db.Boolean, default=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    user = db.relationship("User")
+    product = db.relationship("Product")
+
+class Referral(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    referrer_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    referred_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True)
+    code = db.Column(db.String(40), unique=True, nullable=False)
+    reward_points = db.Column(db.Integer, default=0)
+    rewarded = db.Column(db.Boolean, default=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class LoyaltyPoint(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    points = db.Column(db.Integer, default=0)
+    reason = db.Column(db.String(160), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class Bundle(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(160), nullable=False)
+    description = db.Column(db.Text, default="")
+    price = db.Column(db.Float, nullable=False)
+    active = db.Column(db.Boolean, default=True)
+    featured = db.Column(db.Boolean, default=False)
+    items = db.relationship("BundleItem", backref="bundle", cascade="all, delete-orphan")
+
+class BundleItem(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    bundle_id = db.Column(db.Integer, db.ForeignKey("bundle.id"), nullable=False)
+    plan_id = db.Column(db.Integer, db.ForeignKey("plan.id"), nullable=False)
+    quantity = db.Column(db.Integer, default=1)
+    plan = db.relationship("Plan")
+
+class Order(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    plan_id = db.Column(db.Integer, db.ForeignKey("plan.id"), nullable=True)
+    bundle_id = db.Column(db.Integer, db.ForeignKey("bundle.id"), nullable=True)
+    status = db.Column(db.String(30), default="pending")
+    sale_price = db.Column(db.Float, nullable=False, default=0.0)
+    cost_price = db.Column(db.Float, nullable=False, default=0.0)
+    profit = db.Column(db.Float, nullable=False, default=0.0)
+    discount = db.Column(db.Float, nullable=False, default=0.0)
+    coupon_code = db.Column(db.String(40), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    user = db.relationship("User")
+    plan = db.relationship("Plan")
+    bundle = db.relationship("Bundle")
+
+class OrderDelivery(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    order_id = db.Column(db.Integer, db.ForeignKey("order.id"), unique=True, nullable=False)
+    content = db.Column(db.Text, nullable=False, default="")
+    delivered_at = db.Column(db.DateTime, default=datetime.utcnow)
+    delivered_by_telegram_id = db.Column(db.String(64), nullable=True)
+    sent_to_customer_telegram = db.Column(db.Boolean, default=False)
+    order = db.relationship("Order", backref=db.backref("delivery", uselist=False))
+
+class Subscription(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    product_id = db.Column(db.Integer, db.ForeignKey("product.id"), nullable=False)
+    started_at = db.Column(db.DateTime, nullable=False)
+    expires_at = db.Column(db.DateTime, nullable=False)
+    active = db.Column(db.Boolean, default=True)
+    plan_id = db.Column(db.Integer, db.ForeignKey("plan.id"), nullable=True)
+    order_id = db.Column(db.Integer, db.ForeignKey("order.id"), nullable=True)
+    user = db.relationship("User")
+    product = db.relationship("Product")
+
+class AdminSetting(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    key = db.Column(db.String(80), unique=True, nullable=False)
+    value = db.Column(db.Text, default="")
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class TelegramLink(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    token = db.Column(db.String(80), unique=True, nullable=False)
+    expires_at = db.Column(db.DateTime, nullable=False)
+    used = db.Column(db.Boolean, default=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    user = db.relationship("User")
+
+class AuditLog(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    admin_user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True)
+    action = db.Column(db.String(120), nullable=False)
+    details = db.Column(db.Text, default="")
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    admin_user = db.relationship("User")
+
+TRANSLATIONS = {
+    "en": {
+        "Home":"Home", "Products":"Products", "Categories":"Categories", "Deals":"Deals", "Support":"Support", "Login":"Login", "Create Account":"Create Account", "Account":"Account", "Admin":"Admin", "Logout":"Logout",
+        "All Products":"All Products", "View Deals":"View Deals", "Browse Products →":"Browse Products →", "Instant Delivery":"Instant Delivery", "Secure & Safe":"Secure & Safe", "24/7 Support":"24/7 Support", "Trusted Store":"Trusted Store", "Special Offers":"Special Offers", "Bundle Offers":"Bundle Offers", "Featured Products":"Featured Products", "View Product":"View Product", "Get Bundle →":"Get Bundle →", "View All Deals →":"View All Deals →", "View All Products →":"View All Products →", "Choose your plan":"Choose your plan", "Order":"Order", "Open WhatsApp":"Open WhatsApp", "Customer reviews":"Customer reviews", "Submit Review":"Submit Review", "Active subscriptions":"Active subscriptions", "Orders":"Orders", "No subscriptions yet.":"No subscriptions yet.", "No orders yet.":"No orders yet.", "Business Dashboard":"Business Dashboard", "Total sales":"Total sales", "Total cost":"Total cost", "Net product profit":"Net product profit", "Orders & profit":"Orders & profit", "Products & pricing":"Products & pricing", "Save":"Save", "Customers":"Customers", "Coupons":"Coupons", "Reviews waiting for approval":"Reviews waiting for approval", "Approve":"Approve", "Reject":"Reject", "Store activity":"Store activity", "Wishlist items":"Wishlist items", "Loyalty points issued":"Loyalty points issued", "Register":"Register", "Password":"Password", "Username":"Username", "Email":"Email", "Welcome":"Welcome", "Referral":"Referral", "Rewards":"Rewards", "My referral link":"My referral link", "Referral points":"Referral points", "Earn points only after your referred friend makes a purchase.":"Earn points only after your referred friend makes a purchase.",
+    },
+    "de": {
+        "Home":"Startseite", "Products":"Produkte", "Categories":"Kategorien", "Deals":"Angebote", "Support":"Support", "Login":"Anmelden", "Create Account":"Konto erstellen", "Account":"Konto", "Admin":"Admin", "Logout":"Abmelden", "All Products":"Alle Produkte", "View Deals":"Angebote ansehen", "Browse Products →":"Produkte ansehen →", "Instant Delivery":"Sofortige Lieferung", "Secure & Safe":"Sicher & geschützt", "24/7 Support":"24/7 Support", "Trusted Store":"Vertrauenswürdiger Shop", "Special Offers":"Sonderangebote", "Bundle Offers":"Bundle-Angebote", "Featured Products":"Empfohlene Produkte", "View Product":"Produkt ansehen", "Get Bundle →":"Bundle kaufen →", "View All Deals →":"Alle Angebote →", "View All Products →":"Alle Produkte →", "Choose your plan":"Tarif wählen", "Order":"Bestellen", "Open WhatsApp":"WhatsApp öffnen", "Customer reviews":"Kundenbewertungen", "Submit Review":"Bewertung senden", "Active subscriptions":"Aktive Abonnements", "Orders":"Bestellungen", "No subscriptions yet.":"Noch keine Abonnements.", "No orders yet.":"Noch keine Bestellungen.", "Business Dashboard":"Business-Dashboard", "Total sales":"Gesamtumsatz", "Total cost":"Gesamtkosten", "Net product profit":"Nettogewinn", "Orders & profit":"Bestellungen & Gewinn", "Products & pricing":"Produkte & Preise", "Save":"Speichern", "Customers":"Kunden", "Coupons":"Gutscheine", "Reviews waiting for approval":"Bewertungen zur Freigabe", "Approve":"Freigeben", "Reject":"Ablehnen", "Store activity":"Shop-Aktivität", "Wishlist items":"Wunschlisten-Einträge", "Loyalty points issued":"Vergebene Treuepunkte", "Register":"Registrieren", "Password":"Passwort", "Username":"Benutzername", "Email":"E-Mail", "Welcome":"Willkommen", "Referral":"Empfehlungen", "Rewards":"Prämien", "My referral link":"Mein Empfehlungslink", "Referral points":"Empfehlungspunkte", "Earn points only after your referred friend makes a purchase.":"Punkte gibt es erst, wenn dein geworbener Freund einen Kauf tätigt.",
+    },
+    "fr": {
+        "Home":"Accueil", "Products":"Produits", "Categories":"Catégories", "Deals":"Offres", "Support":"Assistance", "Login":"Connexion", "Create Account":"Créer un compte", "Account":"Compte", "Admin":"Admin", "Logout":"Déconnexion", "All Products":"Tous les produits", "View Deals":"Voir les offres", "Browse Products →":"Voir les produits →", "Instant Delivery":"Livraison instantanée", "Secure & Safe":"Sûr et sécurisé", "24/7 Support":"Assistance 24/7", "Trusted Store":"Boutique de confiance", "Special Offers":"Offres spéciales", "Bundle Offers":"Offres groupées", "Featured Products":"Produits populaires", "View Product":"Voir le produit", "Get Bundle →":"Acheter le bundle →", "View All Deals →":"Voir toutes les offres →", "View All Products →":"Voir tous les produits →", "Choose your plan":"Choisissez votre formule", "Order":"Commander", "Open WhatsApp":"Ouvrir WhatsApp", "Customer reviews":"Avis clients", "Submit Review":"Envoyer l'avis", "Active subscriptions":"Abonnements actifs", "Orders":"Commandes", "No subscriptions yet.":"Aucun abonnement pour le moment.", "No orders yet.":"Aucune commande pour le moment.", "Business Dashboard":"Tableau de bord", "Total sales":"Ventes totales", "Total cost":"Coût total", "Net product profit":"Bénéfice net", "Orders & profit":"Commandes & bénéfice", "Products & pricing":"Produits & tarifs", "Save":"Enregistrer", "Customers":"Clients", "Coupons":"Coupons", "Reviews waiting for approval":"Avis en attente", "Approve":"Approuver", "Reject":"Rejeter", "Store activity":"Activité de la boutique", "Wishlist items":"Articles favoris", "Loyalty points issued":"Points fidélité distribués", "Register":"Inscription", "Password":"Mot de passe", "Username":"Nom d'utilisateur", "Email":"E-mail", "Welcome":"Bienvenue", "Referral":"Parrainage", "Rewards":"Récompenses", "My referral link":"Mon lien de parrainage", "Referral points":"Points de parrainage", "Earn points only after your referred friend makes a purchase.":"Les points sont attribués uniquement après l'achat de votre filleul.",
+    },
+    "sq": {
+        "Home":"Ballina", "Products":"Produktet", "Categories":"Kategoritë", "Deals":"Oferta", "Support":"Mbështetje", "Login":"Hyr", "Create Account":"Krijo llogari", "Account":"Llogaria", "Admin":"Admin", "Logout":"Dil", "All Products":"Të gjitha produktet", "View Deals":"Shiko ofertat", "Browse Products →":"Shiko produktet →", "Instant Delivery":"Dorëzim i menjëhershëm", "Secure & Safe":"Sigurt & i mbrojtur", "24/7 Support":"Mbështetje 24/7", "Trusted Store":"Dyqan i besueshëm", "Special Offers":"Oferta speciale", "Bundle Offers":"Oferta Bundle", "Featured Products":"Produktet e zgjedhura", "View Product":"Shiko produktin", "Get Bundle →":"Bli Bundle →", "View All Deals →":"Shiko të gjitha ofertat →", "View All Products →":"Shiko të gjitha produktet →", "Choose your plan":"Zgjidh planin", "Order":"Porosit", "Open WhatsApp":"Hap WhatsApp", "Customer reviews":"Vlerësimet e klientëve", "Submit Review":"Dërgo vlerësimin", "Active subscriptions":"Abonimet aktive", "Orders":"Porositë", "No subscriptions yet.":"Ende nuk ka abonime.", "No orders yet.":"Ende nuk ka porosi.", "Business Dashboard":"Paneli i biznesit", "Total sales":"Shitjet totale", "Total cost":"Kostoja totale", "Net product profit":"Fitimi neto", "Orders & profit":"Porositë & fitimi", "Products & pricing":"Produktet & çmimet", "Save":"Ruaj", "Customers":"Klientët", "Coupons":"Kuponët", "Reviews waiting for approval":"Vlerësime në pritje", "Approve":"Aprovo", "Reject":"Refuzo", "Store activity":"Aktiviteti i dyqanit", "Wishlist items":"Artikujt në dëshira", "Loyalty points issued":"Pikët e besnikërisë", "Register":"Regjistrohu", "Password":"Fjalëkalimi", "Username":"Username", "Email":"Email", "Welcome":"Mirë se erdhe", "Referral":"Referimi", "Rewards":"Shpërblimet", "My referral link":"Linku im i referimit", "Referral points":"Pikë referimi", "Earn points only after your referred friend makes a purchase.":"Pikët fitohen vetëm pasi personi i referuar bën një blerje.",
+    }
+}
+
+
+# Phase 6 analytics / UX vocabulary.
+for _lang, _vals in {
+    "en": {"Analytics":"Analytics","days":"days","Average order":"Average order","Net profit margin":"Net profit margin","Points issued":"Points issued","Sales — last 14 days":"Sales — last 14 days","Non-cancelled orders":"Non-cancelled orders","Top products":"Top products","By recorded sales":"By recorded sales","No sales yet.":"No sales yet.","More":"More","Explore":"Explore","View products":"View products","Shop bundles":"Shop bundles","Special offer":"Special offer","Recommended":"Recommended","Better prices. Simple choice.":"Better prices. Simple choice.","See the products customers choose most.":"See the products customers choose most.","Find your next favorite.":"Find your next favorite.","Popular digital products in one place.":"Popular digital products in one place.","Clean":"Clean","Glass":"Glass","Dark":"Dark","Neon":"Neon"},
+    "de": {"Analytics":"Analysen","days":"Tage","Average order":"Durchschnittliche Bestellung","Net profit margin":"Nettogewinnmarge","Points issued":"Vergebene Punkte","Sales — last 14 days":"Umsatz — letzte 14 Tage","Non-cancelled orders":"Nicht stornierte Bestellungen","Top products":"Top-Produkte","By recorded sales":"Nach erfasstem Umsatz","No sales yet.":"Noch keine Verkäufe.","More":"Mehr","Explore":"Entdecken","View products":"Produkte ansehen","Shop bundles":"Bundles ansehen","Special offer":"Sonderangebot","Recommended":"Empfohlen","Better prices. Simple choice.":"Bessere Preise. Einfache Auswahl.","See the products customers choose most.":"Sieh dir die beliebtesten Produkte an.","Find your next favorite.":"Finde deinen nächsten Favoriten.","Popular digital products in one place.":"Beliebte digitale Produkte an einem Ort.","Clean":"Clean","Glass":"Glass","Dark":"Dunkel","Neon":"Neon"},
+    "fr": {"Analytics":"Analyses","days":"jours","Average order":"Commande moyenne","Net profit margin":"Marge nette","Points issued":"Points distribués","Sales — last 14 days":"Ventes — 14 derniers jours","Non-cancelled orders":"Commandes non annulées","Top products":"Meilleurs produits","By recorded sales":"Par ventes enregistrées","No sales yet.":"Aucune vente pour le moment.","More":"Plus","Explore":"Explorer","View products":"Voir les produits","Shop bundles":"Voir les bundles","Special offer":"Offre spéciale","Recommended":"Recommandé","Better prices. Simple choice.":"De meilleurs prix. Un choix simple.","See the products customers choose most.":"Découvrez les produits les plus choisis.","Find your next favorite.":"Trouvez votre prochain favori.","Popular digital products in one place.":"Les produits numériques populaires au même endroit.","Clean":"Clair","Glass":"Verre","Dark":"Sombre","Neon":"Néon"},
+    "sq": {"Analytics":"Analitika","days":"ditë","Average order":"Porosia mesatare","Net profit margin":"Marzhi i fitimit neto","Points issued":"Pikë të dhëna","Sales — last 14 days":"Shitjet — 14 ditët e fundit","Non-cancelled orders":"Porosi jo të anuluara","Top products":"Produktet kryesore","By recorded sales":"Sipas shitjeve të regjistruara","No sales yet.":"Ende nuk ka shitje.","More":"Më shumë","Explore":"Eksploro","View products":"Shiko produktet","Shop bundles":"Shiko Bundles","Special offer":"Ofertë speciale","Recommended":"Rekomanduar","Better prices. Simple choice.":"Çmime më të mira. Zgjedhje e thjeshtë.","See the products customers choose most.":"Shiko produktet që zgjedhin më shumë klientët.","Find your next favorite.":"Gjej të preferuarin tënd të radhës.","Popular digital products in one place.":"Produktet digjitale të njohura në një vend.","Clean":"E pastër","Glass":"Glass","Dark":"E errët","Neon":"Neon"}
+}.items():
+    TRANSLATIONS[_lang].update(_vals)
+
+TRANSLATIONS["en"].update({"Wishlist":"Wishlist","Saved products":"Saved products","View Product":"View Product","Your wishlist is empty.":"Your wishlist is empty.","Loyalty points":"Loyalty points","Delivery":"Delivery"})
+TRANSLATIONS["de"].update({"Wishlist":"Wunschliste","Saved products":"Gespeicherte Produkte","Your wishlist is empty.":"Deine Wunschliste ist leer.","Loyalty points":"Treuepunkte","Delivery":"Lieferung"})
+TRANSLATIONS["fr"].update({"Wishlist":"Liste de souhaits","Saved products":"Produits enregistrés","Your wishlist is empty.":"Votre liste de souhaits est vide.","Loyalty points":"Points fidélité","Delivery":"Livraison"})
+TRANSLATIONS["sq"].update({"Wishlist":"Lista e dëshirave","Saved products":"Produktet e ruajtura","Your wishlist is empty.":"Lista e dëshirave është bosh.","Loyalty points":"Pikë besnikërie","Delivery":"Dorëzimi"})
+
+TRANSLATIONS["en"].update({"Customer account":"Customer account","Welcome, @":"Welcome, @","Started":"Started","No approved reviews yet.":"No approved reviews yet.","Back to products":"Back to products","Add / Remove Wishlist":"Add / Remove Wishlist","Full access for":"Full access for","Protected admin area":"Protected admin area","Sales, costs and real profit in one place.":"Sales, costs and real profit in one place.","Revenue from orders":"Revenue from orders","Supplier / acquisition cost":"Supplier / acquisition cost","Sales − cost":"Sales − cost","Total recorded orders":"Total recorded orders","Historical orders keep their original cost/sale/profit.":"Historical orders keep their original cost/sale/profit.","Bundle cost is calculated from the selected plans' acquisition costs; the sale price is the bundle price.":"Bundle cost is calculated from the selected plans' acquisition costs; the sale price is the bundle price.","Code":"Code","Discount":"Discount","Uses":"Uses","Expires":"Expires","Order #":"Order #","Status:":"Status:","Create account":"Create account","Pa emër dhe mbiemër.":"No first or last name.","Open WhatsApp":"Open WhatsApp"})
+
+# Complete UI dictionary used by the public store and admin center.
+_EXTRA = {
+"Digital marketplace":"Digital marketplace","Digital access. Real possibilities.":"Digital access. Real possibilities.","Premium digital products in one simple marketplace.":"Premium digital products in one simple marketplace.","Digital products. Better value.":"Digital products. Better value.","More possibilities.":"More possibilities.","Less spending.":"Less spending.","Get the digital services you use every day at better prices, with simple ordering and real support.":"Get the digital services you use every day at better prices, with simple ordering and real support.","Browse Products":"Browse Products","See Deals":"See Deals","Clear prices":"Clear prices","Easy ordering":"Easy ordering","Real support":"Real support","All":"All","Shop":"Shop","Popular products":"Popular products","Choose what you need. Keep it simple.":"Choose what you need. Keep it simple.","products":"products","product":"product","Search products...":"Search products...","month":"month","months":"months","Popular":"Popular","from":"from","View product":"View product","No products match your search.":"No products match your search.","Save more":"Save more","Bundle deals":"Bundle deals","Put several services together and pay one special price.":"Put several services together and pay one special price.","BUNDLE":"BUNDLE","Special price":"Special price","Get bundle":"Get bundle","Login to order":"Login to order","Simple ordering":"Simple ordering","No unnecessary steps.":"No unnecessary steps.","Transparent pricing":"Transparent pricing","See the price before ordering.":"See the price before ordering.","One account":"One account","Orders and subscriptions together.":"Orders and subscriptions together.","We are here when you need us.":"We are here when you need us.","A smarter way to buy":"A smarter way to buy","Why pay full price when you can pay less?":"Why pay full price when you can pay less?","Great digital services, better value. Simple, transparent and made for everyday use.":"Great digital services, better value. Simple, transparent and made for everyday use.","Explore now":"Explore now","Change theme":"Change theme","Shop":"Shop","Help":"Help","Company":"Company","FAQ":"FAQ","Delivery":"Delivery","About":"About","Privacy":"Privacy","Terms":"Terms","All rights reserved.":"All rights reserved.","Back to products":"Back to products","Add / Remove Wishlist":"Add / Remove Wishlist","Choose your plan":"Choose your plan","Full access for":"Full access for","Coupon":"Coupon","Order":"Order","Customer reviews":"Customer reviews","Write a review...":"Write a review...","Submit Review":"Submit Review","No approved reviews yet.":"No approved reviews yet.","Welcome back":"Welcome back","Sign in to manage your orders and subscriptions.":"Sign in to manage your orders and subscriptions.","No account yet?":"No account yet?","Create your account":"Create your account","Only username, email and password.":"Only username, email and password.","Already have an account?":"Already have an account?","Customer account":"Customer account","Active subscriptions":"Active subscriptions","Expires":"Expires","Active":"Active","No subscriptions yet.":"No subscriptions yet.","Rewards":"Rewards","Loyalty points":"Loyalty points","My referral link":"My referral link","Referral points are earned only after your referred friend completes a purchase.":"Referral points are earned only after your referred friend completes a purchase.","Orders":"Orders","No orders yet.":"No orders yet.","Order created":"Order created","Your order is ready. Contact us on WhatsApp to complete it.":"Your order is ready. Contact us on WhatsApp to complete it.","Go to account":"Go to account","Veyra Control":"Veyra Control","Manage everything from one place":"Manage everything from one place","Dashboard":"Dashboard","Bundles":"Bundles","Marketing":"Marketing","Settings":"Settings","Activity":"Activity","View store":"View store","Control center":"Control center","Good control. Less work.":"Good control. Less work.","Run products, prices, offers, orders and customers without touching code.":"Run products, prices, offers, orders and customers without touching code.","Product":"Product","Bundle":"Bundle","Sales":"Sales","Cost":"Cost","Profit":"Profit","non-cancelled orders":"non-cancelled orders","acquisition cost":"acquisition cost","sales minus cost":"sales minus cost","pending":"pending","registered":"registered","active":"active","Catalog":"Catalog","Add products, images, plans, prices and visibility from here.":"Add products, images, plans, prices and visibility from here.","Product name":"Product name","Category":"Category","URL slug":"URL slug","Short description":"Short description","Image URL":"Image URL","Replace image":"Replace image","Months":"Months","Price":"Price","Sale price":"Sale price","Your cost":"Your cost","Visible":"Visible","Featured":"Featured","Create product":"Create product","Name":"Name","Description":"Description","Slug":"Slug","Live":"Live","Hidden":"Hidden","plans":"plans","Plans & pricing":"Plans & pricing","Public price · sale price · cost":"Public price · sale price · cost","On":"On","Save":"Save","Remove this plan?":"Remove this plan?","New plan":"New plan","Add plan":"Add plan","Remove / Archive product":"Remove / Archive product","Offers":"Offers","Build bundles, choose plans and set one special price.":"Build bundles, choose plans and set one special price.","Bundle name":"Bundle name","Bundle price":"Bundle price","items":"items","Save bundle":"Save bundle","Remove this bundle?":"Remove this bundle?","Remove":"Remove","No bundles yet.":"No bundles yet.","Completed orders activate subscriptions and referral rewards.":"Completed orders activate subscriptions and referral rewards.","Customer":"Customer","Sale":"Sale","Status":"Status","No customers yet.":"No customers yet.","People":"People","Trust":"Trust","Reviews":"Reviews","Approve":"Approve","Reject":"Reject","Approved":"Approved","No reviews yet.":"No reviews yet.","Create discounts without touching code.":"Create discounts without touching code.","Code":"Code","Max uses":"Max uses","Create coupon":"Create coupon","used":"used","Disable":"Disable","Enable":"Enable","Automation":"Automation","Connect two admin Telegram IDs and receive order notifications.":"Connect two admin Telegram IDs and receive order notifications.","Connected":"Connected","Not configured":"Not configured","Admin 1 Telegram ID":"Admin 1 Telegram ID","Admin 2 Telegram ID":"Admin 2 Telegram ID","Save Telegram IDs":"Save Telegram IDs","Send test notification":"Send test notification","Bot commands":"Bot commands","Admin commands":"Admin commands","Store":"Store","Settings & appearance":"Settings & appearance","Control the look, language and public contact details.":"Control the look, language and public contact details.","Store name":"Store name","Support WhatsApp":"Support WhatsApp","Support email":"Support email","Default language":"Default language","Hero title – English":"Hero title – English","Hero title – German":"Hero title – German","Hero title – French":"Hero title – French","Hero title – Albanian":"Hero title – Albanian","Announcement":"Announcement","Optional top announcement":"Optional top announcement","Store logo URL":"Store logo URL","Default theme":"Default theme","Maintenance mode":"Maintenance mode","Save settings":"Save settings","Available themes":"Available themes","Security":"Security","Activity log":"Activity log","See what admins changed.":"See what admins changed.","Clear activity log?":"Clear activity log?","Clear log":"Clear log","No activity yet.":"No activity yet."
+}
+for _k,_v in _EXTRA.items(): TRANSLATIONS["en"].setdefault(_k,_v)
+TRANSLATIONS["de"].update({
+"Digital marketplace":"Digitaler Marktplatz","Digital access. Real possibilities.":"Digitaler Zugang. Echte Möglichkeiten.","Premium digital products in one simple marketplace.":"Premium-Digitalprodukte auf einem einfachen Marktplatz.","Digital products. Better value.":"Digitale Produkte. Besserer Wert.","More possibilities.":"Mehr Möglichkeiten.","Less spending.":"Weniger Ausgaben.","Get the digital services you use every day at better prices, with simple ordering and real support.":"Digitale Dienste des Alltags zu besseren Preisen – einfach bestellen und mit echtem Support.","Browse Products":"Produkte ansehen","See Deals":"Angebote ansehen","Clear prices":"Klare Preise","Easy ordering":"Einfach bestellen","Real support":"Echter Support","All":"Alle","Shop":"Shop","Popular products":"Beliebte Produkte","Choose what you need. Keep it simple.":"Wähle, was du brauchst. Einfach halten.","products":"Produkte","product":"Produkt","Search products...":"Produkte suchen...","month":"Monat","months":"Monate","Popular":"Beliebt","from":"ab","View product":"Produkt ansehen","No products match your search.":"Keine Produkte passen zu deiner Suche.","Save more":"Mehr sparen","Bundle deals":"Bundle-Angebote","Put several services together and pay one special price.":"Kombiniere mehrere Dienste und zahle einen Sonderpreis.","Special price":"Sonderpreis","Get bundle":"Bundle kaufen","Login to order":"Zum Bestellen anmelden","Simple ordering":"Einfach bestellen","No unnecessary steps.":"Keine unnötigen Schritte.","Transparent pricing":"Transparente Preise","See the price before ordering.":"Preis vor der Bestellung sehen.","One account":"Ein Konto","Orders and subscriptions together.":"Bestellungen und Abos zusammen.","We are here when you need us.":"Wir sind für dich da.","A smarter way to buy":"Cleverer einkaufen","Why pay full price when you can pay less?":"Warum den vollen Preis zahlen, wenn es günstiger geht?","Great digital services, better value. Simple, transparent and made for everyday use.":"Starke digitale Dienste, besserer Wert. Einfach, transparent und für den Alltag gemacht.","Explore now":"Jetzt entdecken","Change theme":"Theme ändern","Help":"Hilfe","Company":"Unternehmen","FAQ":"FAQ","Delivery":"Lieferung","About":"Über uns","Privacy":"Datenschutz","Terms":"AGB","All rights reserved.":"Alle Rechte vorbehalten.","Back to products":"Zurück zu den Produkten","Add / Remove Wishlist":"Zur Wunschliste hinzufügen / entfernen","Choose your plan":"Tarif wählen","Full access for":"Voller Zugriff für","Coupon":"Gutschein","Order":"Bestellen","Customer reviews":"Kundenbewertungen","Write a review...":"Bewertung schreiben...","Submit Review":"Bewertung senden","No approved reviews yet.":"Noch keine freigegebenen Bewertungen.","Welcome back":"Willkommen zurück","Sign in to manage your orders and subscriptions.":"Melde dich an, um Bestellungen und Abos zu verwalten.","No account yet?":"Noch kein Konto?","Create your account":"Konto erstellen","Only username, email and password.":"Nur Benutzername, E-Mail und Passwort.","Already have an account?":"Schon ein Konto?","Customer account":"Kundenkonto","Active subscriptions":"Aktive Abonnements","Expires":"Läuft ab","Active":"Aktiv","No subscriptions yet.":"Noch keine Abonnements.","Rewards":"Prämien","Loyalty points":"Treuepunkte","My referral link":"Mein Empfehlungslink","Referral points are earned only after your referred friend completes a purchase.":"Empfehlungspunkte gibt es erst nach dem abgeschlossenen Kauf deines Freundes.","Orders":"Bestellungen","No orders yet.":"Noch keine Bestellungen.","Order created":"Bestellung erstellt","Your order is ready. Contact us on WhatsApp to complete it.":"Deine Bestellung ist bereit. Kontaktiere uns über WhatsApp, um sie abzuschließen.","Go to account":"Zum Konto","Veyra Control":"Veyra Control","Manage everything from one place":"Alles an einem Ort verwalten","Dashboard":"Dashboard","Bundles":"Bundles","Marketing":"Marketing","Settings":"Einstellungen","Activity":"Aktivität","View store":"Shop ansehen","Control center":"Kontrollzentrum","Good control. Less work.":"Mehr Kontrolle. Weniger Arbeit.","Run products, prices, offers, orders and customers without touching code.":"Produkte, Preise, Angebote, Bestellungen und Kunden ohne Code verwalten.","Product":"Produkt","Bundle":"Bundle","Sales":"Umsatz","Cost":"Kosten","Profit":"Gewinn","non-cancelled orders":"nicht stornierte Bestellungen","acquisition cost":"Einkaufskosten","sales minus cost":"Umsatz minus Kosten","pending":"offen","registered":"registriert","active":"aktiv","Catalog":"Katalog","Add products, images, plans, prices and visibility from here.":"Produkte, Bilder, Tarife, Preise und Sichtbarkeit hier verwalten.","Product name":"Produktname","Category":"Kategorie","URL slug":"URL-Slug","Short description":"Kurzbeschreibung","Image URL":"Bild-URL","Replace image":"Bild ersetzen","Months":"Monate","Price":"Preis","Sale price":"Angebotspreis","Your cost":"Dein Einkaufspreis","Visible":"Sichtbar","Featured":"Hervorgehoben","Create product":"Produkt erstellen","Name":"Name","Description":"Beschreibung","Slug":"Slug","Live":"Live","Hidden":"Versteckt","plans":"Tarife","Plans & pricing":"Tarife & Preise","Public price · sale price · cost":"Öffentlicher Preis · Angebot · Kosten","On":"An","Save":"Speichern","Remove this plan?":"Diesen Tarif entfernen?","New plan":"Neuer Tarif","Add plan":"Tarif hinzufügen","Remove / Archive product":"Produkt entfernen / archivieren","Offers":"Angebote","Build bundles, choose plans and set one special price.":"Bundles erstellen, Tarife wählen und einen Sonderpreis festlegen.","Bundle name":"Bundle-Name","Bundle price":"Bundle-Preis","items":"Elemente","Save bundle":"Bundle speichern","Remove this bundle?":"Dieses Bundle entfernen?","Remove":"Entfernen","No bundles yet.":"Noch keine Bundles.","Completed orders activate subscriptions and referral rewards.":"Abgeschlossene Bestellungen aktivieren Abos und Empfehlungsprämien.","Customer":"Kunde","Sale":"Verkauf","Status":"Status","No customers yet.":"Noch keine Kunden.","People":"Kunden","Trust":"Vertrauen","Reviews":"Bewertungen","Approve":"Freigeben","Reject":"Ablehnen","Approved":"Freigegeben","No reviews yet.":"Noch keine Bewertungen.","Create discounts without touching code.":"Rabatte ohne Code erstellen.","Code":"Code","Max uses":"Max. Nutzungen","Create coupon":"Gutschein erstellen","used":"verwendet","Disable":"Deaktivieren","Enable":"Aktivieren","Automation":"Automatisierung","Connect two admin Telegram IDs and receive order notifications.":"Zwei Admin-Telegram-IDs verbinden und Bestellmeldungen erhalten.","Connected":"Verbunden","Not configured":"Nicht eingerichtet","Admin 1 Telegram ID":"Telegram-ID Admin 1","Admin 2 Telegram ID":"Telegram-ID Admin 2","Save Telegram IDs":"Telegram-IDs speichern","Send test notification":"Testmeldung senden","Bot commands":"Bot-Befehle","Admin commands":"Admin-Befehle","Store":"Shop","Settings & appearance":"Einstellungen & Design","Control the look, language and public contact details.":"Aussehen, Sprache und öffentliche Kontaktdaten steuern.","Store name":"Shopname","Support WhatsApp":"Support-WhatsApp","Support email":"Support-E-Mail","Default language":"Standardsprache","Hero title – English":"Hero-Titel – Englisch","Hero title – German":"Hero-Titel – Deutsch","Hero title – French":"Hero-Titel – Französisch","Hero title – Albanian":"Hero-Titel – Albanisch","Announcement":"Ankündigung","Optional top announcement":"Optionale Ankündigung oben","Store logo URL":"Shop-Logo-URL","Default theme":"Standard-Theme","Maintenance mode":"Wartungsmodus","Save settings":"Einstellungen speichern","Available themes":"Verfügbare Themes","Security":"Sicherheit","Activity log":"Aktivitätsprotokoll","See what admins changed.":"Sieh, was Admins geändert haben.","Clear activity log?":"Aktivitätsprotokoll löschen?","Clear log":"Protokoll löschen","No activity yet.":"Noch keine Aktivität."
+})
+TRANSLATIONS["fr"].update({k:v for k,v in {
+"Digital marketplace":"Marché numérique","Digital access. Real possibilities.":"Accès numérique. De vraies possibilités.","Premium digital products in one simple marketplace.":"Produits numériques premium sur une boutique simple.","Digital products. Better value.":"Produits numériques. Meilleure valeur.","More possibilities.":"Plus de possibilités.","Less spending.":"Moins de dépenses.","Get the digital services you use every day at better prices, with simple ordering and real support.":"Les services numériques du quotidien à de meilleurs prix, avec une commande simple et un vrai support.","Browse Products":"Voir les produits","See Deals":"Voir les offres","Clear prices":"Prix clairs","Easy ordering":"Commande simple","Real support":"Vrai support","All":"Tous","Shop":"Boutique","Popular products":"Produits populaires","Choose what you need. Keep it simple.":"Choisissez ce dont vous avez besoin. Faites simple.","products":"produits","product":"produit","Search products...":"Rechercher des produits...","month":"mois","months":"mois","Popular":"Populaire","from":"à partir de","View product":"Voir le produit","No products match your search.":"Aucun produit ne correspond à votre recherche.","Save more":"Économisez plus","Bundle deals":"Offres groupées","Put several services together and pay one special price.":"Regroupez plusieurs services et payez un prix spécial.","Special price":"Prix spécial","Get bundle":"Acheter le bundle","Login to order":"Connectez-vous pour commander","Simple ordering":"Commande simple","No unnecessary steps.":"Aucune étape inutile.","Transparent pricing":"Prix transparents","See the price before ordering.":"Voyez le prix avant de commander.","One account":"Un compte","Orders and subscriptions together.":"Commandes et abonnements au même endroit.","We are here when you need us.":"Nous sommes là quand vous en avez besoin.","A smarter way to buy":"Acheter plus intelligemment","Why pay full price when you can pay less?":"Pourquoi payer le prix fort quand vous pouvez payer moins ?","Great digital services, better value. Simple, transparent and made for everyday use.":"De grands services numériques, une meilleure valeur. Simple, transparent et pensé pour le quotidien.","Explore now":"Découvrir maintenant","Change theme":"Changer de thème","Help":"Aide","Company":"Entreprise","FAQ":"FAQ","Delivery":"Livraison","About":"À propos","Privacy":"Confidentialité","Terms":"Conditions","All rights reserved.":"Tous droits réservés.","Back to products":"Retour aux produits","Add / Remove Wishlist":"Ajouter / retirer des favoris","Choose your plan":"Choisissez votre formule","Full access for":"Accès complet pendant","Coupon":"Coupon","Order":"Commander","Customer reviews":"Avis clients","Write a review...":"Écrire un avis...","Submit Review":"Envoyer l'avis","No approved reviews yet.":"Aucun avis approuvé pour le moment.","Welcome back":"Bon retour","Sign in to manage your orders and subscriptions.":"Connectez-vous pour gérer vos commandes et abonnements.","No account yet?":"Pas encore de compte ?","Create your account":"Créez votre compte","Only username, email and password.":"Seulement nom d'utilisateur, e-mail et mot de passe.","Already have an account?":"Vous avez déjà un compte ?","Customer account":"Compte client","Active subscriptions":"Abonnements actifs","Expires":"Expire","Active":"Actif","No subscriptions yet.":"Aucun abonnement pour le moment.","Rewards":"Récompenses","Loyalty points":"Points fidélité","My referral link":"Mon lien de parrainage","Referral points are earned only after your referred friend completes a purchase.":"Les points de parrainage sont gagnés uniquement après l'achat terminé de votre filleul.","Orders":"Commandes","No orders yet.":"Aucune commande pour le moment.","Order created":"Commande créée","Your order is ready. Contact us on WhatsApp to complete it.":"Votre commande est prête. Contactez-nous sur WhatsApp pour la finaliser.","Go to account":"Aller au compte","Veyra Control":"Veyra Control","Manage everything from one place":"Gérez tout au même endroit","Dashboard":"Tableau de bord","Bundles":"Bundles","Marketing":"Marketing","Settings":"Paramètres","Activity":"Activité","View store":"Voir la boutique","Control center":"Centre de contrôle","Good control. Less work.":"Plus de contrôle. Moins de travail.","Run products, prices, offers, orders and customers without touching code.":"Gérez produits, prix, offres, commandes et clients sans toucher au code.","Product":"Produit","Bundle":"Bundle","Sales":"Ventes","Cost":"Coût","Profit":"Bénéfice","non-cancelled orders":"commandes non annulées","acquisition cost":"coût d'acquisition","sales minus cost":"ventes moins coûts","pending":"en attente","registered":"inscrits","active":"actifs","Catalog":"Catalogue","Add products, images, plans, prices and visibility from here.":"Gérez produits, images, formules, prix et visibilité ici.","Product name":"Nom du produit","Category":"Catégorie","URL slug":"Slug URL","Short description":"Courte description","Image URL":"URL de l'image","Replace image":"Remplacer l'image","Months":"Mois","Price":"Prix","Sale price":"Prix promo","Your cost":"Votre coût","Visible":"Visible","Featured":"À la une","Create product":"Créer le produit","Name":"Nom","Description":"Description","Slug":"Slug","Live":"Actif","Hidden":"Masqué","plans":"formules","Plans & pricing":"Formules & prix","Public price · sale price · cost":"Prix public · promo · coût","On":"Actif","Save":"Enregistrer","Remove this plan?":"Supprimer cette formule ?","New plan":"Nouvelle formule","Add plan":"Ajouter une formule","Remove / Archive product":"Supprimer / archiver le produit","Offers":"Offres","Build bundles, choose plans and set one special price.":"Créez des bundles, choisissez les formules et fixez un prix spécial.","Bundle name":"Nom du bundle","Bundle price":"Prix du bundle","items":"éléments","Save bundle":"Enregistrer le bundle","Remove this bundle?":"Supprimer ce bundle ?","Remove":"Supprimer","No bundles yet.":"Aucun bundle pour le moment.","Completed orders activate subscriptions and referral rewards.":"Les commandes terminées activent les abonnements et les récompenses de parrainage.","Customer":"Client","Sale":"Vente","Status":"Statut","No customers yet.":"Aucun client pour le moment.","People":"Clients","Trust":"Confiance","Reviews":"Avis","Approve":"Approuver","Reject":"Rejeter","Approved":"Approuvé","No reviews yet.":"Aucun avis.","Create discounts without touching code.":"Créez des réductions sans toucher au code.","Code":"Code","Max uses":"Utilisations max.","Create coupon":"Créer un coupon","used":"utilisé","Disable":"Désactiver","Enable":"Activer","Automation":"Automatisation","Connect two admin Telegram IDs and receive order notifications.":"Connectez deux IDs Telegram admin et recevez les notifications de commande.","Connected":"Connecté","Not configured":"Non configuré","Admin 1 Telegram ID":"ID Telegram Admin 1","Admin 2 Telegram ID":"ID Telegram Admin 2","Save Telegram IDs":"Enregistrer les IDs Telegram","Send test notification":"Envoyer une notification test","Bot commands":"Commandes du bot","Admin commands":"Commandes admin","Store":"Boutique","Settings & appearance":"Paramètres & apparence","Control the look, language and public contact details.":"Gérez l'apparence, la langue et les contacts publics.","Store name":"Nom de la boutique","Support WhatsApp":"WhatsApp support","Support email":"E-mail support","Default language":"Langue par défaut","Hero title – English":"Titre hero – anglais","Hero title – German":"Titre hero – allemand","Hero title – French":"Titre hero – français","Hero title – Albanian":"Titre hero – albanais","Announcement":"Annonce","Optional top announcement":"Annonce supérieure facultative","Store logo URL":"URL du logo","Default theme":"Thème par défaut","Maintenance mode":"Mode maintenance","Save settings":"Enregistrer les paramètres","Available themes":"Thèmes disponibles","Security":"Sécurité","Activity log":"Journal d'activité","See what admins changed.":"Voir ce que les admins ont modifié.","Clear activity log?":"Effacer le journal d'activité ?","Clear log":"Effacer le journal","No activity yet.":"Aucune activité."
+}.items()})
+TRANSLATIONS["sq"].update({k:v for k,v in {
+"Digital marketplace":"Treg digjital","Digital access. Real possibilities.":"Qasje digjitale. Mundësi reale.","Premium digital products in one simple marketplace.":"Produkte digjitale premium në një treg të thjeshtë.","Digital products. Better value.":"Produkte digjitale. Vlerë më e mirë.","More possibilities.":"Më shumë mundësi.","Less spending.":"Më pak shpenzime.","Get the digital services you use every day at better prices, with simple ordering and real support.":"Merr shërbimet digjitale që përdor çdo ditë me çmime më të mira, porosi të thjeshtë dhe mbështetje reale.","Browse Products":"Shiko produktet","See Deals":"Shiko ofertat","Clear prices":"Çmime të qarta","Easy ordering":"Porosi e lehtë","Real support":"Mbështetje reale","All":"Të gjitha","Shop":"Dyqani","Popular products":"Produktet e njohura","Choose what you need. Keep it simple.":"Zgjidh çfarë të duhet. Mbaje të thjeshtë.","products":"produkte","product":"produkt","Search products...":"Kërko produkte...","month":"muaj","months":"muaj","Popular":"Popullore","from":"nga","View product":"Shiko produktin","No products match your search.":"Asnjë produkt nuk përputhet me kërkimin.","Save more":"Kursen më shumë","Bundle deals":"Oferta Bundle","Put several services together and pay one special price.":"Bashko disa shërbime dhe paguaj një çmim special.","Special price":"Çmim special","Get bundle":"Bli Bundle","Login to order":"Hyr për të porositur","Simple ordering":"Porosi e thjeshtë","No unnecessary steps.":"Pa hapa të panevojshëm.","Transparent pricing":"Çmime transparente","See the price before ordering.":"Shiko çmimin para porosisë.","One account":"Një llogari","Orders and subscriptions together.":"Porositë dhe abonimet në një vend.","We are here when you need us.":"Jemi këtu kur të duhemi.","A smarter way to buy":"Mënyrë më e zgjuar për të blerë","Why pay full price when you can pay less?":"Pse të paguash çmimin e plotë kur mund të paguash më pak?","Great digital services, better value. Simple, transparent and made for everyday use.":"Shërbime të mira digjitale, vlerë më e mirë. Të thjeshta, transparente dhe për përdorim të përditshëm.","Explore now":"Eksploro tani","Change theme":"Ndrysho temën","Help":"Ndihmë","Company":"Kompania","FAQ":"FAQ","Delivery":"Dorëzimi","About":"Rreth nesh","Privacy":"Privatësia","Terms":"Kushtet","All rights reserved.":"Të gjitha të drejtat e rezervuara.","Back to products":"Kthehu te produktet","Add / Remove Wishlist":"Shto / hiq nga dëshirat","Choose your plan":"Zgjidh planin","Full access for":"Qasje e plotë për","Coupon":"Kupon","Order":"Porosit","Customer reviews":"Vlerësimet e klientëve","Write a review...":"Shkruaj vlerësim...","Submit Review":"Dërgo vlerësimin","No approved reviews yet.":"Ende nuk ka vlerësime të aprovuara.","Welcome back":"Mirë se u ktheve","Sign in to manage your orders and subscriptions.":"Hyr për të menaxhuar porositë dhe abonimet.","No account yet?":"Nuk ke llogari?","Create your account":"Krijo llogarinë","Only username, email and password.":"Vetëm username, email dhe fjalëkalim.","Already have an account?":"Ke llogari?","Customer account":"Llogaria e klientit","Active subscriptions":"Abonimet aktive","Expires":"Skadon","Active":"Aktiv","No subscriptions yet.":"Ende nuk ka abonime.","Rewards":"Shpërblimet","Loyalty points":"Pikët e besnikërisë","My referral link":"Linku im i referimit","Referral points are earned only after your referred friend completes a purchase.":"Pikët e referimit fitohen vetëm pasi personi i referuar e përfundon blerjen.","Orders":"Porositë","No orders yet.":"Ende nuk ka porosi.","Order created":"Porosia u krijua","Your order is ready. Contact us on WhatsApp to complete it.":"Porosia jote është gati. Na kontakto në WhatsApp për ta përfunduar.","Go to account":"Shko te llogaria","Veyra Control":"Veyra Control","Manage everything from one place":"Menaxho gjithçka nga një vend","Dashboard":"Paneli","Bundles":"Bundles","Marketing":"Marketing","Settings":"Cilësimet","Activity":"Aktiviteti","View store":"Shiko dyqanin","Control center":"Qendra e kontrollit","Good control. Less work.":"Më shumë kontroll. Më pak punë.","Run products, prices, offers, orders and customers without touching code.":"Menaxho produktet, çmimet, ofertat, porositë dhe klientët pa prekur kodin.","Product":"Produkt","Bundle":"Bundle","Sales":"Shitjet","Cost":"Kosto","Profit":"Fitimi","non-cancelled orders":"porosi jo të anuluara","acquisition cost":"kosto e blerjes","sales minus cost":"shitje minus kosto","pending":"në pritje","registered":"të regjistruar","active":"aktive","Catalog":"Katalogu","Add products, images, plans, prices and visibility from here.":"Shto produkte, foto, plane, çmime dhe kontrollo dukshmërinë këtu.","Product name":"Emri i produktit","Category":"Kategoria","URL slug":"Slug i URL-së","Short description":"Përshkrim i shkurtër","Image URL":"URL e fotos","Replace image":"Zëvendëso foton","Months":"Muajt","Price":"Çmimi","Sale price":"Çmimi në zbritje","Your cost":"Kostoja jote","Visible":"I dukshëm","Featured":"I veçuar","Create product":"Krijo produkt","Name":"Emri","Description":"Përshkrimi","Slug":"Slug","Live":"Aktiv","Hidden":"Fshehur","plans":"plane","Plans & pricing":"Planet & çmimet","Public price · sale price · cost":"Çmimi publik · zbritja · kostoja","On":"Aktiv","Save":"Ruaj","Remove this plan?":"Ta heqim këtë plan?","New plan":"Plan i ri","Add plan":"Shto plan","Remove / Archive product":"Hiq / Arkivo produktin","Offers":"Ofertat","Build bundles, choose plans and set one special price.":"Krijo bundles, zgjidh planet dhe vendos një çmim special.","Bundle name":"Emri i Bundle","Bundle price":"Çmimi i Bundle","items":"artikuj","Save bundle":"Ruaj Bundle","Remove this bundle?":"Ta heqim këtë Bundle?","Remove":"Hiq","No bundles yet.":"Ende nuk ka Bundles.","Completed orders activate subscriptions and referral rewards.":"Porositë e përfunduara aktivizojnë abonimet dhe shpërblimet e referimit.","Customer":"Klienti","Sale":"Shitja","Status":"Statusi","No customers yet.":"Ende nuk ka klientë.","People":"Klientët","Trust":"Besimi","Reviews":"Vlerësimet","Approve":"Aprovo","Reject":"Refuzo","Approved":"Aprovuar","No reviews yet.":"Ende nuk ka vlerësime.","Create discounts without touching code.":"Krijo zbritje pa prekur kodin.","Code":"Kodi","Max uses":"Përdorime max.","Create coupon":"Krijo kupon","used":"përdorur","Disable":"Çaktivizo","Enable":"Aktivizo","Automation":"Automatizimi","Connect two admin Telegram IDs and receive order notifications.":"Lidh dy ID të adminëve në Telegram dhe merr njoftime për porositë.","Connected":"I lidhur","Not configured":"Nuk është konfiguruar","Admin 1 Telegram ID":"Telegram ID Admin 1","Admin 2 Telegram ID":"Telegram ID Admin 2","Save Telegram IDs":"Ruaj Telegram ID-të","Send test notification":"Dërgo njoftim testues","Bot commands":"Komandat e botit","Admin commands":"Komandat e adminit","Store":"Dyqani","Settings & appearance":"Cilësimet & pamja","Control the look, language and public contact details.":"Kontrollo pamjen, gjuhën dhe kontaktet publike.","Store name":"Emri i dyqanit","Support WhatsApp":"WhatsApp i supportit","Support email":"Email i supportit","Default language":"Gjuha fillestare","Hero title – English":"Titulli hero – Anglisht","Hero title – German":"Titulli hero – Gjermanisht","Hero title – French":"Titulli hero – Frëngjisht","Hero title – Albanian":"Titulli hero – Shqip","Announcement":"Njoftimi","Optional top announcement":"Njoftim opsional në krye","Store logo URL":"URL e logos së dyqanit","Default theme":"Tema fillestare","Maintenance mode":"Modalitet mirëmbajtjeje","Save settings":"Ruaj cilësimet","Available themes":"Temat në dispozicion","Security":"Siguria","Activity log":"Ditari i aktivitetit","See what admins changed.":"Shiko çfarë kanë ndryshuar adminët.","Clear activity log?":"Ta pastrojmë ditarin e aktivitetit?","Clear log":"Pastro ditarin","No activity yet.":"Ende nuk ka aktivitet."
+}.items()})
+
+for _l in ("de","fr","sq"):
+    TRANSLATIONS[_l].update({"Customer account": TRANSLATIONS[_l].get("Account","Account"),"Started":"Gestartet am" if _l=="de" else ("Commencé le" if _l=="fr" else "Filluar më"),"No approved reviews yet.":"Noch keine freigegebenen Bewertungen." if _l=="de" else ("Aucun avis approuvé pour le moment." if _l=="fr" else "Ende nuk ka vlerësime të aprovuara."),"Back to products":"Zurück zu den Produkten" if _l=="de" else ("Retour aux produits" if _l=="fr" else "Kthehu te produktet"),"Add / Remove Wishlist":"Zur Wunschliste hinzufügen / entfernen" if _l=="de" else ("Ajouter / retirer des favoris" if _l=="fr" else "Shto / hiq nga dëshirat"),"Full access for":"Voller Zugriff für" if _l=="de" else ("Accès complet pendant" if _l=="fr" else "Qasje e plotë për"),"Protected admin area":"Geschützter Admin-Bereich" if _l=="de" else ("Espace admin protégé" if _l=="fr" else "Zona e mbrojtur e adminit"),"Code":"Code" if _l in ("de","fr") else "Kodi","Discount":"Rabatt" if _l=="de" else ("Réduction" if _l=="fr" else "Zbritja"),"Uses":"Nutzungen" if _l=="de" else ("Utilisations" if _l=="fr" else "Përdorime"),"Expires":"Läuft ab" if _l=="de" else ("Expire" if _l=="fr" else "Skadon"),"Create account":"Konto erstellen" if _l=="de" else ("Créer un compte" if _l=="fr" else "Krijo llogari"),"Open WhatsApp":"WhatsApp öffnen" if _l=="de" else ("Ouvrir WhatsApp" if _l=="fr" else "Hap WhatsApp")})
+
+# Category labels are translated with the rest of the storefront.
+for _lang, _vals in {
+    "en": {"Streaming":"Streaming","Music":"Music","AI":"AI","Sport":"Sport","Gaming":"Gaming","Software":"Software","Cloud":"Cloud","VPN & Security":"VPN & Security"},
+    "de": {"Streaming":"Streaming","Music":"Musik","AI":"KI","Sport":"Sport","Gaming":"Gaming","Software":"Software","Cloud":"Cloud","VPN & Security":"VPN & Sicherheit"},
+    "fr": {"Streaming":"Streaming","Music":"Musique","AI":"IA","Sport":"Sport","Gaming":"Jeux","Software":"Logiciels","Cloud":"Cloud","VPN & Security":"VPN & sécurité"},
+    "sq": {"Streaming":"Streaming","Music":"Muzikë","AI":"AI","Sport":"Sport","Gaming":"Gaming","Software":"Software","Cloud":"Cloud","VPN & Security":"VPN & Siguri"},
+}.items():
+    TRANSLATIONS[_lang].update(_vals)
+
+for _lang, _vals in {
+    "en":{"Premium":"Premium","Made simple.":"Made simple.","More":"More","Special offer":"Special offer","Better prices. Simple choice.":"Better prices. Simple choice.","See the products customers choose most.":"See the products customers choose most.","Explore":"Explore","View products":"View products","Find your next favorite.":"Find your next favorite.","Pay securely":"Pay securely"},
+    "de":{"Premium":"Premium","Made simple.":"Einfach gemacht.","More":"Mehr","Special offer":"Sonderangebot","Better prices. Simple choice.":"Bessere Preise. Einfache Wahl.","See the products customers choose most.":"Entdecke die beliebtesten Produkte.","Explore":"Entdecken","View products":"Produkte ansehen","Find your next favorite.":"Finde deinen nächsten Favoriten.","Pay securely":"Sicher bezahlen"},
+    "fr":{"Premium":"Premium","Made simple.":"En toute simplicité.","More":"Plus","Special offer":"Offre spéciale","Better prices. Simple choice.":"De meilleurs prix. Un choix simple.","See the products customers choose most.":"Découvrez les produits les plus choisis.","Explore":"Explorer","View products":"Voir les produits","Find your next favorite.":"Trouvez votre prochain favori.","Pay securely":"Payer en toute sécurité"},
+    "sq":{"Premium":"Premium","Made simple.":"Thjesht.","More":"Më shumë","Special offer":"Ofertë speciale","Better prices. Simple choice.":"Çmime më të mira. Zgjedhje e thjeshtë.","See the products customers choose most.":"Shiko produktet që zgjedhin më shumë klientët.","Explore":"Eksploro","View products":"Shiko produktet","Find your next favorite.":"Gjej të preferuarin tënd të radhës.","Pay securely":"Paguaj në mënyrë të sigurt"},
+}.items(): TRANSLATIONS[_lang].update(_vals)
+
+PRODUCT_LOGOS = {
+    "netflix":"/static/logos/netflix.svg",
+    "spotify":"/static/logos/spotify.svg",
+    "youtube-premium":"/static/logos/youtube-premium.svg",
+    "crunchyroll-mega-fan":"/static/logos/crunchyroll-mega-fan.svg",
+    "chatgpt":"/static/logos/chatgpt.svg",
+    "gemini":"/static/logos/gemini.svg",
+    "dazn":"/static/logos/dazn.svg",
+    "disney-plus":"/static/logos/disney-plus.svg",
+    "amazon-prime":"/static/logos/amazon-prime.svg",
+    "apple-tv-plus":"/static/logos/apple-tv-plus.svg",
+    "apple-music":"/static/logos/apple-music.svg",
+    "canva-pro":"/static/logos/canva-pro.svg",
+    "capcut-pro":"/static/logos/capcut-pro.svg",
+    "microsoft-365":"/static/logos/microsoft-365.svg",
+    "google-one":"/static/logos/google-one.svg",
+    "icloud-plus":"/static/logos/icloud-plus.svg",
+    "nordvpn":"/static/logos/nordvpn.svg",
+    "xbox-game-pass":"/static/logos/xbox-game-pass.svg",
+    "playstation-plus":"/static/logos/playstation-plus.svg",
+}
+
+def product_logo(product):
+    # Known brands always use bundled local assets. This prevents broken
+    # external image URLs from replacing the real brand mark. Unknown/admin
+    # products can still use their custom image URL.
+    mapped = PRODUCT_LOGOS.get(product.slug, "")
+    if mapped:
+        return mapped + "?v=20260910"
+    return (product.image_url or "").strip()
+
+@app.before_request
+def set_language():
+    lang = request.args.get("lang")
+    if lang in TRANSLATIONS:
+        session["lang"] = lang
+    if "lang" not in session:
+        session["lang"] = "en"
+    if request.endpoint not in {"static", "login", "register", "logout"} and "AdminSetting" in globals():
+        try:
+            row = AdminSetting.query.filter_by(key="maintenance_mode").first()
+            if row and row.value == "on" and not (current_user.is_authenticated and current_user.is_admin):
+                return render_template("maintenance.html"), 503
+        except Exception:
+            pass
+
+@app.context_processor
+def inject_i18n():
+    lang = session.get("lang", "en")
+    def tr(text):
+        return TRANSLATIONS.get(lang, TRANSLATIONS["en"]).get(text, TRANSLATIONS["en"].get(text, text))
+    settings = {x.key:x.value for x in AdminSetting.query.all()} if 'AdminSetting' in globals() else {}
+    theme = settings.get("default_theme", "clean")
+    hero_defaults = {"en":"More possibilities. Less spending.","de":"Mehr Möglichkeiten. Weniger Ausgaben.","fr":"Plus de possibilités. Moins de dépenses.","sq":"Më shumë mundësi. Më pak shpenzime."}
+    hero_title = settings.get(f"hero_title_{lang}") or tr(hero_defaults[lang])
+    def switch_url(code):
+        from urllib.parse import urlencode
+        args = request.args.to_dict(flat=True)
+        args["lang"] = code
+        return request.path + ("?" + urlencode(args) if args else "") + ("#" + request.path.split("#",1)[1] if "#" in request.path else "")
+    return {"lang": lang, "languages": [("en","English"),("de","Deutsch"),("fr","Français"),("sq","Shqip")], "tr": tr, "translations": TRANSLATIONS, "switch_url": switch_url, "store_name": settings.get("store_name","Veyra"), "theme": theme, "announcement": settings.get("announcement",""), "hero_title": hero_title, "store_logo_url": settings.get("store_logo_url",""), "payment_provider": settings.get("payment_provider","whatsapp"), "product_logo": product_logo}
+
+def seed():
+    cats = [
+        ("Streaming","streaming"),("Music","music"),("AI","ai"),("Sport","sport"),
+        ("Gaming","gaming"),("Software","software"),("Cloud","cloud"),("VPN & Security","vpn-security")
+    ]
+    for name, slug in cats:
+        if not Category.query.filter_by(slug=slug).first():
+            db.session.add(Category(name=name, slug=slug))
+    db.session.commit()
+
+    defaults = [
+        ("Netflix","netflix","Streaming"),
+        ("Spotify","spotify","Music"),
+        ("YouTube Premium","youtube-premium","Streaming"),
+        ("Crunchyroll Mega Fan","crunchyroll-mega-fan","Streaming"),
+        ("ChatGPT","chatgpt","AI"),
+        ("Google AI Pro / Gemini","gemini","AI"),
+        ("DAZN","dazn","Sport"),
+        ("Disney+","disney-plus","Streaming"),
+        ("Amazon Prime","amazon-prime","Streaming"),
+        ("Apple TV+","apple-tv-plus","Streaming"),
+        ("Apple Music","apple-music","Music"),
+        ("Canva Pro","canva-pro","Software"),
+        ("CapCut Pro","capcut-pro","Software"),
+        ("Microsoft 365","microsoft-365","Software"),
+        ("Google One","google-one","Cloud"),
+        ("iCloud+","icloud-plus","Cloud"),
+        ("NordVPN","nordvpn","VPN & Security"),
+        ("Xbox Game Pass","xbox-game-pass","Gaming"),
+        ("PlayStation Plus","playstation-plus","Gaming"),
+    ]
+    for name, slug, cat_name in defaults:
+        if not Product.query.filter_by(slug=slug).first():
+            cat = Category.query.filter_by(name=cat_name).first()
+            p = Product(name=name, slug=slug, category=cat, description=f"{name} subscription.")
+            db.session.add(p)
+            db.session.flush()
+            for months, label in [(1,"1 Month"),(3,"3 Months"),(6,"6 Months"),(12,"12 Months")]:
+                db.session.add(Plan(product_id=p.id, name=label, months=months, price=0))
+    # Give seeded products polished brand logos automatically; admin-uploaded images always win.
+    changed = False
+    for _p in Product.query.all():
+        if not _p.image_url and _p.slug in PRODUCT_LOGOS:
+            _p.image_url = PRODUCT_LOGOS[_p.slug]
+            changed = True
+    if changed:
+        db.session.commit()
+
+    # Example bulk offer. Admin can edit/add bundles later.
+    if not Bundle.query.filter_by(name="Netflix + Spotify Bundle").first():
+        netflix = Product.query.filter_by(slug="netflix").first()
+        spotify = Product.query.filter_by(slug="spotify").first()
+        if netflix and spotify:
+            nplan = Plan.query.filter_by(product_id=netflix.id, months=1).first()
+            splan = Plan.query.filter_by(product_id=spotify.id, months=1).first()
+            if nplan and splan:
+                b = Bundle(name="Netflix + Spotify Bundle",
+                           description="Get Netflix + Spotify together for a lower price.",
+                           price=8.0, featured=True)
+                db.session.add(b); db.session.flush()
+                db.session.add(BundleItem(bundle_id=b.id, plan_id=nplan.id, quantity=1))
+                db.session.add(BundleItem(bundle_id=b.id, plan_id=splan.id, quantity=1))
+                db.session.commit()
+
+    for uname, env_user, env_pass in [
+        ("admin1","ADMIN1_USERNAME","ADMIN1_PASSWORD"),
+        ("admin2","ADMIN2_USERNAME","ADMIN2_PASSWORD")
+    ]:
+        username = os.getenv(env_user, uname)
+        password = os.getenv(env_pass, "")
+        if password and not User.query.filter_by(username=username).first():
+            db.session.add(User(username=username, email=f"{username}@local.admin",
+                                password_hash=generate_password_hash(password), is_admin=True))
+    db.session.commit()
+
+@login_manager.user_loader
+def load_user(user_id):
+    return db.session.get(User, int(user_id))
+
+def admin_required():
+    return current_user.is_authenticated and current_user.is_admin
+
+@app.context_processor
+def inject_now():
+    return {"now": datetime.utcnow()}
+
+def apply_coupon(code, subtotal, user_id=None):
+    if not code:
+        return 0.0, None, ""
+    c = Coupon.query.filter_by(code=code.strip().upper(), active=True).first()
+    if not c:
+        return 0.0, None, "Invalid coupon code."
+    if c.expires_at and c.expires_at < datetime.utcnow():
+        return 0.0, None, "This coupon has expired."
+    if c.max_uses and c.used_count >= c.max_uses:
+        return 0.0, None, "This coupon has reached its usage limit."
+    if user_id and CouponUsage.query.filter_by(coupon_id=c.id, user_id=user_id).first():
+        return 0.0, None, "You have already used this coupon."
+    discount = subtotal * (c.discount_percent / 100.0) + c.discount_fixed
+    return max(0.0, min(subtotal, discount)), c, ""
+
+def loyalty_setting(key, default):
+    row = AdminSetting.query.filter_by(key=key).first()
+    try:
+        return float(row.value) if row and row.value != "" else float(default)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def telegram_admin_ids():
+    """Return the exact two configured admin Telegram numeric IDs."""
+    ids = []
+    for key in ("ADMIN1_TELEGRAM_ID", "ADMIN2_TELEGRAM_ID"):
+        value = os.getenv(key, "").strip()
+        if value and value not in ids:
+            ids.append(value)
+    # DB values are useful after the admin saves them in the panel.
+    def add_db_ids():
+        for u in User.query.filter_by(is_admin=True).order_by(User.id).limit(2).all():
+            value = (u.telegram_id or "").strip()
+            if value and value not in ids:
+                ids.append(value)
+    if has_app_context():
+        add_db_ids()
+    else:
+        try:
+            with app.app_context():
+                add_db_ids()
+        except Exception:
+            pass
+    return ids[:2]
+
+def telegram_authorized(user_id):
+    ids = telegram_admin_ids()
+    return len(ids) == 2 and str(user_id) in ids
+
+def telegram_api(method, payload=None):
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    if not token:
+        return None
+    try:
+        r = requests.post(f"https://api.telegram.org/bot{token}/{method}", json=payload or {}, timeout=20)
+        if r.ok:
+            return r.json()
+        app.logger.warning("Telegram API %s failed: %s", method, r.text[:500])
+    except Exception as exc:
+        app.logger.warning("Telegram API %s error: %s", method, exc)
+    return None
+
+def send_telegram(message):
+    ids = telegram_admin_ids()
+    if not os.getenv("TELEGRAM_BOT_TOKEN", "").strip() or len(ids) != 2:
+        return False, "Telegram bot token and exactly two admin Telegram IDs are required."
+    ok = False
+    errors = []
+    for chat_id in ids:
+        result = telegram_api("sendMessage", {"chat_id": chat_id, "text": message})
+        if result and result.get("ok"):
+            ok = True
+        else:
+            errors.append(chat_id)
+    return ok, ", ".join(errors)
+
+def send_telegram_chat(chat_id, message, reply_markup=None):
+    payload = {"chat_id": str(chat_id), "text": message}
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    result = telegram_api("sendMessage", payload)
+    return bool(result and result.get("ok"))
+
+def telegram_orders_keyboard():
+    with app.app_context():
+        orders = Order.query.filter(Order.status.in_(["pending", "processing"])).order_by(Order.created_at.asc()).limit(20).all()
+        rows = []
+        for o in orders:
+            label = f"📦 #{o.id} · {(o.plan.product.name if o.plan else o.bundle.name)[:28]}"
+            rows.append([{"text": label, "callback_data": f"deliver:{o.id}"}])
+        return {"inline_keyboard": rows} if rows else None
+
+# In-memory state is only the short-lived Telegram compose step; the final delivery is persisted in DB.
+TELEGRAM_DELIVERY_DRAFTS = {}
+
+def customer_telegram_user(chat_id):
+    return User.query.filter_by(telegram_id=str(chat_id), is_admin=False).first()
+
+def customer_orders_keyboard(user_id):
+    orders = Order.query.filter_by(user_id=user_id).order_by(Order.created_at.desc()).limit(15).all()
+    rows=[]
+    for o in orders:
+        item = f"{o.plan.product.name} — {o.plan.name}" if o.plan else (o.bundle.name if o.bundle else "Order")
+        rows.append([{"text": f"#{o.id} · {item[:28]}", "callback_data": f"custorder:{o.id}"}])
+    return {"inline_keyboard": rows} if rows else None
+
+def customer_subscriptions_text(user_id):
+    subs=Subscription.query.filter_by(user_id=user_id).order_by(Subscription.expires_at.desc()).all()
+    if not subs: return "📭 No subscriptions yet."
+    lines=["🔐 Your subscriptions"]
+    for x in subs:
+        state="ACTIVE" if x.active and x.expires_at>datetime.utcnow() else "EXPIRED"
+        lines.append(f"• {x.product.name} — {state} — expires {x.expires_at.strftime('%d.%m.%Y %H:%M')}")
+    return "\n".join(lines)
+
+def customer_order_text(o):
+    item=f"{o.plan.product.name} — {o.plan.name}" if o.plan else (o.bundle.name if o.bundle else "Order")
+    text=f"🧾 Order #{o.id}\n📦 {item}\n💶 €{o.sale_price:.2f}\n📌 {o.status}"
+    if o.delivery:
+        text += f"\n\n📦 Delivery\n{o.delivery.content}"
+    return text
+
+def telegram_order_text(o):
+    item = f"{o.plan.product.name} — {o.plan.name}" if o.plan else o.bundle.name
+    return (f"🧾 Order #{o.id}\n"
+            f"👤 @{o.user.username}\n"
+            f"📦 {item}\n"
+            f"💶 €{o.sale_price:.2f}\n"
+            f"📌 Status: {o.status}")
+
+def telegram_handle_update(update):
+    # Callback buttons
+    cq = update.get("callback_query") or {}
+    if cq:
+        uid = cq.get("from", {}).get("id")
+        data = cq.get("data", "")
+        chat_id = cq.get("message", {}).get("chat", {}).get("id", uid)
+        if data.startswith("custorder:"):
+            with app.app_context():
+                try: oid=int(data.split(":",1)[1])
+                except ValueError: oid=0
+                customer=customer_telegram_user(chat_id)
+                o=db.session.get(Order, oid)
+                if not customer or not o or o.user_id != customer.id:
+                    send_telegram_chat(chat_id, "⛔ Order not available.")
+                else:
+                    send_telegram_chat(chat_id, customer_order_text(o))
+            telegram_api("answerCallbackQuery", {"callback_query_id": cq.get("id")})
+            return
+        if not telegram_authorized(uid):
+            telegram_api("answerCallbackQuery", {"callback_query_id": cq.get("id"), "text": "Not authorized.", "show_alert": True})
+            return
+        data = cq.get("data", "")
+        chat_id = cq.get("message", {}).get("chat", {}).get("id", uid)
+        if data == "cust_orders":
+            with app.app_context():
+                customer=customer_telegram_user(chat_id)
+                kb=customer_orders_keyboard(customer.id) if customer else None
+                send_telegram_chat(chat_id, "🛒 Your recent orders:", kb) if customer else send_telegram_chat(chat_id,"⛔ Account not linked.")
+            telegram_api("answerCallbackQuery", {"callback_query_id": cq.get("id")})
+            return
+        if data == "cust_subs":
+            with app.app_context():
+                customer=customer_telegram_user(chat_id)
+                send_telegram_chat(chat_id, customer_subscriptions_text(customer.id) if customer else "⛔ Account not linked.")
+            telegram_api("answerCallbackQuery", {"callback_query_id": cq.get("id")})
+            return
+        if data == "admin_orders":
+            kb = telegram_orders_keyboard()
+            text = "📋 Pending / processing orders." if kb else "✅ No pending orders."
+            send_telegram_chat(chat_id, text, kb)
+        elif data.startswith("deliver:"):
+            try: oid = int(data.split(":",1)[1])
+            except ValueError: oid = 0
+            with app.app_context():
+                o = db.session.get(Order, oid)
+                if not o:
+                    send_telegram_chat(chat_id, "❌ Order not found.")
+                elif o.status == "cancelled":
+                    send_telegram_chat(chat_id, "❌ This order is cancelled.")
+                else:
+                    TELEGRAM_DELIVERY_DRAFTS[uid] = {"order_id": oid, "chat_id": chat_id, "stage": "content"}
+                    send_telegram_chat(chat_id, telegram_order_text(o) + "\n\n✍️ Send the product/account details now.\nI will show you a preview before confirming delivery.")
+        elif data == "delivery_confirm":
+            draft = TELEGRAM_DELIVERY_DRAFTS.get(uid)
+            if not draft or draft.get("stage") != "confirm":
+                send_telegram_chat(chat_id, "⚠️ No delivery draft is waiting for confirmation.")
+            else:
+                with app.app_context():
+                    o = db.session.get(Order, draft["order_id"])
+                    if not o:
+                        send_telegram_chat(chat_id, "❌ Order no longer exists.")
+                    else:
+                        existing = OrderDelivery.query.filter_by(order_id=o.id).first()
+                        if existing:
+                            send_telegram_chat(chat_id, "⚠️ This order already has a delivery recorded.")
+                        else:
+                            d = OrderDelivery(order_id=o.id, content=draft["content"], delivered_by_telegram_id=str(uid), sent_to_customer_telegram=False)
+                            db.session.add(d)
+                            previous = o.status
+                            # Complete order and activate subscription/rewards exactly like website admin.
+                            complete_order_record(o, source=f"telegram:{uid}")
+                            db.session.commit()
+                            sent = False
+                            if o.user.telegram_id and str(o.user.telegram_id) != str(uid):
+                                sent = send_telegram_chat(o.user.telegram_id, f"✅ Veyra delivery for order #{o.id}\n\n{draft['content']}\n\nYour order is now completed.")
+                                d.sent_to_customer_telegram = sent
+                                db.session.commit()
+                            audit_note = f"Order #{o.id} delivered via Telegram by {uid}; previous status {previous}"
+                            app.logger.info(audit_note)
+                            send_telegram_chat(chat_id, f"✅ Delivered and confirmed on website.\nOrder #{o.id} is now COMPLETED." + ("\n📨 Sent to customer's Telegram." if sent else "\nℹ️ Customer Telegram is not linked, so delivery is stored on the website only."))
+                            notify_admins(f"📦 Delivery confirmed from Telegram\nOrder #{o.id}\n@{o.user.username}\n€{o.sale_price:.2f}")
+                TELEGRAM_DELIVERY_DRAFTS.pop(uid, None)
+        elif data == "delivery_cancel":
+            TELEGRAM_DELIVERY_DRAFTS.pop(uid, None)
+            send_telegram_chat(chat_id, "↩️ Delivery cancelled. Order remains unchanged.")
+        telegram_api("answerCallbackQuery", {"callback_query_id": cq.get("id")})
+        return
+
+    msg = update.get("message") or {}
+    uid = msg.get("from", {}).get("id")
+    chat_id = msg.get("chat", {}).get("id", uid)
+    text = (msg.get("text") or "").strip()
+    if not text:
+        return
+    if text.startswith("/"):
+        command = text.split()[0].split("@",1)[0].lower()
+        args = text.split()[1:]
+        if command in {"/start", "/help"}:
+            if telegram_authorized(uid):
+                send_telegram_chat(chat_id, "🤖 Veyra Admin Bot\n\n/orders — pending orders\n/products — active products\n/customers — customer count\n/subscriptions — active subscriptions\n/settelegram username telegram_id — manual customer link\n/stats — store stats\n/cancel — cancel current delivery draft")
+            else:
+                customer=customer_telegram_user(chat_id)
+                if customer:
+                    kb={"inline_keyboard":[[{"text":"🛒 My orders","callback_data":"cust_orders"}],[{"text":"🔐 My subscriptions","callback_data":"cust_subs"}]]}
+                    send_telegram_chat(chat_id, f"👋 Welcome to Veyra, @{customer.username}.", kb)
+                else:
+                    send_telegram_chat(chat_id, "👋 Veyra bot is online.\n\nTo connect your Veyra account, generate a Telegram link code from your Account page and send: /link CODE")
+            return
+        if command == "/link":
+            if not args:
+                send_telegram_chat(chat_id, "Usage: /link CODE")
+                return
+            with app.app_context():
+                link=TelegramLink.query.filter_by(token=args[0].strip(), used=False).first()
+                if not link or link.expires_at < datetime.utcnow():
+                    send_telegram_chat(chat_id, "❌ Link code is invalid or expired.")
+                elif User.query.filter(User.telegram_id==str(chat_id), User.id!=link.user_id).first():
+                    send_telegram_chat(chat_id, "❌ This Telegram account is already linked to another Veyra account.")
+                else:
+                    u=db.session.get(User, link.user_id)
+                    u.telegram_id=str(chat_id); link.used=True; db.session.commit()
+                    send_telegram_chat(chat_id, f"✅ Telegram connected to @{u.username}.\nYou can now receive deliveries and check your Veyra orders here.")
+            return
+        if command == "/orders" and not telegram_authorized(uid):
+            with app.app_context():
+                customer=customer_telegram_user(chat_id)
+                kb=customer_orders_keyboard(customer.id) if customer else None
+                send_telegram_chat(chat_id, "🛒 Your recent orders:", kb) if customer else send_telegram_chat(chat_id, "⛔ Connect your Veyra account first with /link CODE")
+            return
+        if command == "/subscriptions" and not telegram_authorized(uid):
+            with app.app_context():
+                customer=customer_telegram_user(chat_id)
+                send_telegram_chat(chat_id, customer_subscriptions_text(customer.id) if customer else "⛔ Connect your Veyra account first with /link CODE")
+            return
+        if command == "/orders" and telegram_authorized(uid):
+            kb = telegram_orders_keyboard()
+            send_telegram_chat(chat_id, "📋 Zgjidh porosinë që dëshiron ta dorëzosh:" if kb else "✅ Nuk ka porosi në pritje.", kb)
+            return
+        if command == "/settelegram" and telegram_authorized(uid):
+            if len(args) != 2:
+                send_telegram_chat(chat_id, "Usage: /settelegram username telegram_id")
+                return
+            username, target_id = args[0].lstrip("@"), args[1].strip()
+            if not target_id.lstrip("-").isdigit():
+                send_telegram_chat(chat_id, "Telegram ID must be numeric.")
+                return
+            with app.app_context():
+                customer = User.query.filter_by(username=username, is_admin=False).first()
+                if not customer:
+                    send_telegram_chat(chat_id, f"❌ Customer @{username} not found.")
+                elif User.query.filter(User.telegram_id == target_id, User.id != customer.id).first():
+                    send_telegram_chat(chat_id, "❌ That Telegram ID is already linked to another account.")
+                else:
+                    customer.telegram_id = target_id
+                    db.session.commit()
+                    send_telegram_chat(chat_id, f"✅ Telegram linked to @{customer.username}. Future confirmed deliveries can be sent directly to this Telegram account.")
+            return
+
+        if command == "/products" and telegram_authorized(uid):
+            with app.app_context():
+                products=Product.query.filter_by(active=True).order_by(Product.name).limit(30).all()
+                text="🛍 Active products\n\n"+"\n".join(f"• {p.name} — {len([x for x in p.plans if x.active])} active plans" for p in products) if products else "📭 No active products."
+                send_telegram_chat(chat_id,text)
+            return
+        if command == "/customers" and telegram_authorized(uid):
+            with app.app_context():
+                total=User.query.filter_by(is_admin=False).count(); linked=User.query.filter(User.is_admin==False, User.telegram_id.isnot(None)).count()
+                send_telegram_chat(chat_id,f"👥 Customers\nTotal: {total}\nTelegram linked: {linked}")
+            return
+        if command == "/subscriptions" and telegram_authorized(uid):
+            with app.app_context():
+                active=Subscription.query.filter_by(active=True).count()
+                send_telegram_chat(chat_id,f"🔐 Active subscriptions: {active}")
+            return
+        if command == "/stats" and telegram_authorized(uid):
+            with app.app_context():
+                orders = Order.query.all()
+                revenue = sum(o.sale_price for o in orders if o.status != "cancelled")
+                profit = sum(o.profit for o in orders if o.status != "cancelled")
+                send_telegram_chat(chat_id, f"📊 Veyra Stats\nOrders: {len(orders)}\nSales: €{revenue:.2f}\nProfit: €{profit:.2f}")
+            return
+        if command == "/cancel" and telegram_authorized(uid):
+            TELEGRAM_DELIVERY_DRAFTS.pop(uid, None)
+            send_telegram_chat(chat_id, "↩️ Draft cancelled.")
+            return
+        if command == "/link":
+            send_telegram_chat(chat_id, "Për lidhjen e klientit me Telegram përdor kodin e lidhjes nga llogaria Veyra.")
+            return
+        if not telegram_authorized(uid):
+            send_telegram_chat(chat_id, "⛔ Admin access denied.")
+            return
+
+    # Content entered after clicking Deliver.
+    draft = TELEGRAM_DELIVERY_DRAFTS.get(uid)
+    if draft and draft.get("stage") == "content":
+        content = text[:10000]
+        draft["content"] = content
+        draft["stage"] = "confirm"
+        kb = {"inline_keyboard": [[
+            {"text": "✅ Confirm & deliver", "callback_data": "delivery_confirm"},
+            {"text": "✖ Cancel", "callback_data": "delivery_cancel"}
+        ]]}
+        send_telegram_chat(chat_id, "🔎 DELIVERY PREVIEW\n\n" + content + "\n\nConfirm to save it on the website and complete the order.", kb)
+
+TELEGRAM_LAST_UPDATE = 0
+TELEGRAM_THREAD = None
+
+def telegram_poll_loop():
+    global TELEGRAM_LAST_UPDATE
+    while True:
+        try:
+            if not os.getenv("TELEGRAM_BOT_TOKEN", "").strip() or len(telegram_admin_ids()) != 2:
+                time.sleep(10)
+                continue
+            result = telegram_api("getUpdates", {"offset": TELEGRAM_LAST_UPDATE + 1, "timeout": 20, "allowed_updates": ["message", "callback_query"]})
+            if result and result.get("ok"):
+                for upd in result.get("result", []):
+                    TELEGRAM_LAST_UPDATE = max(TELEGRAM_LAST_UPDATE, upd.get("update_id", 0))
+                    try: telegram_handle_update(upd)
+                    except Exception as exc: app.logger.exception("Telegram update failed: %s", exc)
+        except Exception as exc:
+            app.logger.warning("Telegram poll loop: %s", exc)
+        time.sleep(1)
+
+def start_telegram_bot():
+    global TELEGRAM_THREAD
+    if TELEGRAM_THREAD and TELEGRAM_THREAD.is_alive():
+        return
+    if not os.getenv("TELEGRAM_BOT_TOKEN", "").strip():
+        return
+    # Avoid a second polling thread under Flask's development reloader.
+    if app.debug and os.getenv("WERKZEUG_RUN_MAIN") != "true":
+        return
+    TELEGRAM_THREAD = threading.Thread(target=telegram_poll_loop, name="veyra-telegram", daemon=True)
+    TELEGRAM_THREAD.start()
+
+
+def notify_admins(message, event="new_order"):
+    app.logger.info("ADMIN NOTIFICATION [%s]: %s", event, message)
+    row = AdminSetting.query.filter_by(key=f"notify_{event}").first() if has_app_context() else None
+    enabled = True if not row or row.value == "" else row.value == "on"
+    if enabled and os.getenv("TELEGRAM_BOT_TOKEN"):
+        send_telegram(message)
+
+def audit(action, details=""):
+    if current_user.is_authenticated and current_user.is_admin:
+        db.session.add(AuditLog(admin_user_id=current_user.id, action=action, details=details))
+
+@app.route("/")
+def index():
+    products = Product.query.filter_by(active=True).order_by(Product.featured.desc(), Product.name).all()
+    categories = Category.query.order_by(Category.name).all()
+    bundles = Bundle.query.filter_by(active=True).order_by(Bundle.featured.desc(), Bundle.name).all()
+    return render_template("index.html", products=products, categories=categories, bundles=bundles)
+
+@app.route("/categories")
+def categories():
+    categories = Category.query.order_by(Category.name).all()
+    products = Product.query.filter_by(active=True).order_by(Product.featured.desc(), Product.name).all()
+    return render_template("categories.html", categories=categories, products=products)
+
+@app.route("/ref/<code>")
+def referral_landing(code):
+    if Referral.query.filter_by(code=code).first():
+        session["pending_referral"] = code
+        flash("Referral saved. The reward is activated only after your first completed purchase.")
+    return redirect(url_for("register"))
+
+@app.route("/register", methods=["GET","POST"])
+def register():
+    if request.method == "POST":
+        username = request.form["username"].strip()
+        email = request.form["email"].strip().lower()
+        password = request.form["password"]
+        if not username or not email or not password:
+            flash("Plotëso të gjitha fushat.")
+        elif User.query.filter_by(username=username).first():
+            flash("Ky username ekziston.")
+        elif User.query.filter_by(email=email).first():
+            flash("Ky email ekziston.")
+        else:
+            u = User(username=username, email=email, password_hash=generate_password_hash(password))
+            db.session.add(u); db.session.flush()
+            ref_code = session.get("pending_referral")
+            if ref_code:
+                ref = Referral.query.filter_by(code=ref_code).first()
+                if ref and ref.referrer_id != u.id and ref.referred_id is None:
+                    ref.referred_id = u.id
+                    db.session.add(ref)
+            # Every customer receives a permanent referral code, but no points are granted for registration.
+            code = f"{username.lower().replace(' ','-')}-{u.id}"
+            if not Referral.query.filter_by(code=code).first():
+                db.session.add(Referral(referrer_id=u.id, code=code))
+            db.session.commit()
+            session.pop("pending_referral", None)
+            login_user(u)
+            return redirect(url_for("account"))
+    return render_template("register.html")
+
+@app.route("/login", methods=["GET","POST"])
+def login():
+    if request.method == "POST":
+        u = User.query.filter_by(username=request.form["username"].strip()).first()
+        if u and check_password_hash(u.password_hash, request.form["password"]):
+            session.clear()
+            session.permanent = True
+            login_user(u)
+            csrf_token()
+            return redirect(url_for("admin" if u.is_admin else "account"))
+        flash("Username ose password gabim.")
+    return render_template("login.html")
+
+@app.route("/logout")
+@login_required
+def logout():
+    logout_user()
+    session.clear()
+    return redirect(url_for("index"))
+
+@app.route("/account/telegram-link", methods=["POST"])
+@login_required
+def account_telegram_link():
+    if current_user.is_admin:
+        flash("Admin accounts are linked through the Admin Telegram settings.")
+        return redirect(url_for("account"))
+    TelegramLink.query.filter_by(user_id=current_user.id, used=False).delete(synchronize_session=False)
+    token=secrets.token_urlsafe(10)
+    db.session.add(TelegramLink(user_id=current_user.id, token=token, expires_at=datetime.utcnow()+timedelta(minutes=15)))
+    db.session.commit()
+    flash(f"Telegram code: {token} — send /link {token} to the Veyra bot within 15 minutes.")
+    return redirect(url_for("account"))
+
+@app.route("/account")
+@login_required
+def account():
+    orders = Order.query.filter_by(user_id=current_user.id).order_by(Order.created_at.desc()).all()
+    subs = Subscription.query.filter_by(user_id=current_user.id).order_by(Subscription.expires_at.desc()).all()
+    points = db.session.query(db.func.coalesce(db.func.sum(LoyaltyPoint.points),0)).filter(LoyaltyPoint.user_id==current_user.id).scalar() or 0
+    point_history = LoyaltyPoint.query.filter_by(user_id=current_user.id).order_by(LoyaltyPoint.created_at.desc()).limit(20).all()
+    wishlist_items = Wishlist.query.filter_by(user_id=current_user.id).all()
+    my_ref = Referral.query.filter_by(referrer_id=current_user.id, referred_id=None).first()
+    if not my_ref:
+        my_ref = Referral.query.filter_by(referrer_id=current_user.id).order_by(Referral.id.desc()).first()
+    return render_template("account.html", orders=orders, subs=subs, points=points, referral=my_ref, point_history=point_history, wishlist_items=wishlist_items)
+
+@app.route("/product/<slug>")
+def product(slug):
+    p = Product.query.filter_by(slug=slug, active=True).first_or_404()
+    reviews = Review.query.filter_by(product_id=p.id, approved=True).order_by(Review.created_at.desc()).all()
+    return render_template("product.html", product=p, reviews=reviews)
+
+@app.route("/order/<int:plan_id>", methods=["POST"])
+@login_required
+def order(plan_id):
+    plan = db.session.get(Plan, plan_id)
+    if not plan or not plan.active or not plan.product.active:
+        flash("Plani nuk është i disponueshëm.")
+        return redirect(url_for("index"))
+    selling_price = plan.sale_price if plan.sale_price is not None else plan.price
+    discount, coupon, coupon_error = apply_coupon(request.form.get("coupon"), selling_price, current_user.id)
+    if request.form.get("coupon") and coupon_error:
+        flash(coupon_error)
+        return redirect(url_for("product", slug=plan.product.slug))
+    final_price = round(selling_price - discount, 2)
+    cost = plan.cost_price or 0.0
+    o = Order(
+        user_id=current_user.id,
+        plan_id=plan.id,
+        sale_price=final_price,
+        cost_price=cost,
+        profit=final_price - cost,
+        discount=discount,
+        coupon_code=coupon.code if coupon else None
+    )
+    if coupon:
+        coupon.used_count += 1
+        db.session.add(coupon)
+        db.session.add(CouponUsage(coupon_id=coupon.id, user_id=current_user.id, order_id=None))
+    db.session.add(o); db.session.flush()
+    if coupon:
+        usage = CouponUsage.query.filter_by(coupon_id=coupon.id, user_id=current_user.id).first()
+        if usage: usage.order_id = o.id
+    audit("New order", f"Order #{o.id} — {plan.product.name} / {plan.name} — €{final_price:.2f}"); db.session.commit()
+    notify_admins(f"🛒 New Veyra order #{o.id}\n@{current_user.username}\n{plan.product.name} — {plan.name}\n€{final_price:.2f}")
+    number = os.getenv("WHATSAPP_NUMBER","" )
+    msg = f"Hello, I want to order {plan.product.name} - {plan.name}. Order #{o.id}. Username: {current_user.username}"
+    wa = f"https://wa.me/{number}?text={quote(msg)}" if number else "#"
+    return render_template("order.html", order=o, wa=wa)
+
+@app.route("/payment/<int:order_id>", methods=["POST"])
+@login_required
+def start_payment(order_id):
+    o = db.session.get(Order, order_id)
+    if not o or o.user_id != current_user.id:
+        return ("Not found", 404)
+    provider = AdminSetting.query.filter_by(key="payment_provider").first()
+    if not provider or provider.value != "stripe":
+        return redirect(url_for("order_payment_unavailable", order_id=o.id))
+    secret = os.getenv("STRIPE_SECRET_KEY", "").strip()
+    if not secret:
+        flash("Stripe is selected but STRIPE_SECRET_KEY is not configured.")
+        return redirect(url_for("order_payment_unavailable", order_id=o.id))
+    payload = {
+        "mode":"payment", "success_url":request.host_url.rstrip("/")+url_for("payment_success")+"?session_id={CHECKOUT_SESSION_ID}",
+        "cancel_url":request.host_url.rstrip("/")+url_for("payment_cancel", order_id=o.id),
+        "client_reference_id":str(o.id), "metadata[order_id]":str(o.id),
+        "line_items[0][price_data][currency]":"eur",
+        "line_items[0][price_data][product_data][name]":(o.plan.product.name if o.plan else o.bundle.name),
+        "line_items[0][price_data][unit_amount]":str(int(round(o.sale_price*100))),
+        "line_items[0][quantity]":"1"}
+    try:
+        r=requests.post("https://api.stripe.com/v1/checkout/sessions",data=payload,auth=(secret,""),timeout=20)
+        data=r.json()
+        if not r.ok or not data.get("url"):
+            app.logger.warning("Stripe checkout error: %s", data)
+            flash("Unable to start Stripe checkout.")
+            return redirect(url_for("order_payment_unavailable", order_id=o.id))
+        audit("Stripe checkout started", f"Order #{o.id}")
+        db.session.commit()
+        return redirect(data["url"])
+    except Exception as exc:
+        app.logger.warning("Stripe checkout exception: %s", exc)
+        flash("Payment service is temporarily unavailable.")
+        return redirect(url_for("order_payment_unavailable", order_id=o.id))
+
+@app.route("/payment/unavailable/<int:order_id>")
+@login_required
+def order_payment_unavailable(order_id):
+    o=db.session.get(Order,order_id)
+    if not o or o.user_id != current_user.id: return ("Not found",404)
+    return render_template("order.html", order=o, wa="#", payment_unavailable=True)
+
+@app.route("/payment/success")
+@login_required
+def payment_success():
+    sid=request.args.get("session_id","").strip(); secret=os.getenv("STRIPE_SECRET_KEY","").strip()
+    if not sid or not secret: return ("Invalid payment session",400)
+    try:
+        r=requests.get(f"https://api.stripe.com/v1/checkout/sessions/{quote(sid,safe='')}",auth=(secret,""),timeout=20); data=r.json()
+    except Exception: return ("Payment verification failed",502)
+    try: oid=int(data.get("metadata",{}).get("order_id") or data.get("client_reference_id") or 0)
+    except ValueError: oid=0
+    o=db.session.get(Order,oid)
+    if not o or o.user_id != current_user.id: return ("Payment order not found",404)
+    if data.get("payment_status") == "paid":
+        o.status="processing"; audit("Payment verified",f"Order #{o.id} paid via Stripe"); db.session.commit()
+        notify_admins(f"💳 Payment confirmed for order #{o.id}\n@{o.user.username}\n€{o.sale_price:.2f}", "payment")
+        flash("Payment confirmed. Your order is now being processed.")
+    return redirect(url_for("account"))
+
+@app.route("/payment/cancel/<int:order_id>")
+@login_required
+def payment_cancel(order_id):
+    o=db.session.get(Order,order_id)
+    if not o or o.user_id != current_user.id: return ("Not found",404)
+    flash("Payment was cancelled. Your order remains pending.")
+    return redirect(url_for("account"))
+
+@app.route("/bundle/<int:bundle_id>/order", methods=["POST"])
+@login_required
+def bundle_order(bundle_id):
+    bundle = db.session.get(Bundle, bundle_id)
+    if not bundle or not bundle.active or not bundle.items:
+        flash("Oferta nuk është e disponueshme.")
+        return redirect(url_for("index"))
+    cost = sum((item.plan.cost_price or 0.0) * item.quantity for item in bundle.items)
+    discount, coupon, coupon_error = apply_coupon(request.form.get("coupon"), bundle.price, current_user.id)
+    if request.form.get("coupon") and coupon_error:
+        flash(coupon_error)
+        return redirect(url_for("index") + "#bundles")
+    final_price = round(bundle.price - discount, 2)
+    o = Order(user_id=current_user.id, bundle_id=bundle.id,
+              sale_price=final_price, cost_price=cost,
+              profit=final_price - cost, discount=discount,
+              coupon_code=coupon.code if coupon else None)
+    if coupon:
+        coupon.used_count += 1
+        db.session.add(coupon)
+        db.session.add(CouponUsage(coupon_id=coupon.id, user_id=current_user.id, order_id=None))
+    db.session.add(o); db.session.flush()
+    if coupon:
+        usage = CouponUsage.query.filter_by(coupon_id=coupon.id, user_id=current_user.id).first()
+        if usage: usage.order_id = o.id
+    audit("New bundle order", f"Order #{o.id} — {bundle.name} — €{final_price:.2f}"); db.session.commit()
+    notify_admins(f"🛒 New Veyra bundle order #{o.id}\n@{current_user.username}\n{bundle.name}\n€{final_price:.2f}")
+    number = os.getenv("WHATSAPP_NUMBER","" )
+    item_names = " + ".join(f"{i.plan.product.name} ({i.plan.name})" for i in bundle.items)
+    msg = f"Hello, I want to order bundle: {bundle.name}. Items: {item_names}. Order #{o.id}. Username: {current_user.username}"
+    wa = f"https://wa.me/{number}?text={quote(msg)}" if number else "#"
+    return render_template("order.html", order=o, wa=wa)
+
+
+@app.route("/wishlist/<int:product_id>", methods=["POST"])
+@login_required
+def wishlist(product_id):
+    p = db.session.get(Product, product_id)
+    if not p:
+        return ("Not found", 404)
+    existing = Wishlist.query.filter_by(user_id=current_user.id, product_id=p.id).first()
+    if existing:
+        db.session.delete(existing)
+    else:
+        db.session.add(Wishlist(user_id=current_user.id, product_id=p.id))
+    db.session.commit()
+    return redirect(request.referrer or url_for("index"))
+
+@app.route("/wishlist")
+@login_required
+def wishlist_page():
+    items = Wishlist.query.filter_by(user_id=current_user.id).order_by(Wishlist.id.desc()).all()
+    return render_template("wishlist.html", items=items)
+
+@app.route("/review/<int:product_id>", methods=["POST"])
+@login_required
+def review(product_id):
+    p = db.session.get(Product, product_id)
+    if not p:
+        return ("Not found",404)
+    has_order = Order.query.join(Plan, Order.plan_id == Plan.id, isouter=True).filter(
+        Order.user_id == current_user.id,
+        db.or_(Plan.product_id == product_id, Order.bundle_id.isnot(None)),
+        Order.status == "completed"
+    ).first()
+    if not has_order:
+        flash("You can review a product after a completed order.")
+        return redirect(request.referrer or url_for("product", slug=p.slug))
+    existing_review = Review.query.filter_by(user_id=current_user.id, product_id=product_id).first()
+    if existing_review:
+        flash("You have already reviewed this product.")
+        return redirect(request.referrer or url_for("product", slug=p.slug))
+    rating = max(1, min(5, int(request.form.get("rating",5))))
+    db.session.add(Review(user_id=current_user.id, product_id=product_id, rating=rating,
+                          text=request.form.get("text","").strip(), approved=False))
+    db.session.commit()
+    flash("Review submitted for approval.")
+    return redirect(request.referrer or url_for("product", slug=p.slug))
+
+@app.route("/admin/review/<int:review_id>/<action>", methods=["POST"])
+@login_required
+def review_action(review_id, action):
+    if not admin_required(): return ("Forbidden",403)
+    r = db.session.get(Review, review_id)
+    if not r: return ("Not found",404)
+    if action == "approve": r.approved = True
+    elif action == "reject": db.session.delete(r)
+    else: return ("Bad action",400)
+    db.session.commit()
+    return redirect(url_for("admin"))
+
+@app.route("/admin")
+@login_required
+def admin():
+    if not admin_required(): return ("Forbidden",403)
+    orders = Order.query.order_by(Order.created_at.desc()).all()
+    revenue = sum(o.sale_price or 0 for o in orders if o.status != "cancelled")
+    costs = sum(o.cost_price or 0 for o in orders if o.status != "cancelled")
+    profit = sum(o.profit or 0 for o in orders if o.status != "cancelled")
+    users = User.query.filter_by(is_admin=False).all()
+    reviews = Review.query.order_by(Review.created_at.desc()).all()
+    coupons = Coupon.query.order_by(Coupon.id.desc()).all()
+    wishlist_count = Wishlist.query.count()
+    points_total = db.session.query(db.func.coalesce(db.func.sum(LoyaltyPoint.points),0)).scalar() or 0
+    # Phase 6 analytics: compact, database-backed reporting for the last 14 days.
+    today = datetime.utcnow().date()
+    analytics_days = []
+    for offset in range(13, -1, -1):
+        day = today - timedelta(days=offset)
+        day_orders = [o for o in orders if o.created_at and o.created_at.date() == day and o.status != "cancelled"]
+        analytics_days.append({
+            "label": day.strftime("%d.%m"),
+            "sales": round(sum(o.sale_price or 0 for o in day_orders), 2),
+            "profit": round(sum(o.profit or 0 for o in day_orders), 2),
+            "orders": len(day_orders),
+        })
+    product_sales = {}
+    for o in orders:
+        if o.status == "cancelled":
+            continue
+        name = o.plan.product.name if o.plan and o.plan.product else (o.bundle.name if o.bundle else "Unknown")
+        product_sales[name] = product_sales.get(name, 0) + (o.sale_price or 0)
+    top_products = sorted(product_sales.items(), key=lambda x: x[1], reverse=True)[:8]
+    avg_order = round(revenue / len([o for o in orders if o.status != "cancelled"]), 2) if any(o.status != "cancelled" for o in orders) else 0
+    return render_template("admin.html",
+        products=Product.query.order_by(Product.name).all(), bundles=Bundle.query.order_by(Bundle.featured.desc(), Bundle.name).all(),
+        plans=Plan.query.join(Product).order_by(Product.name, Plan.months).all(), categories=Category.query.order_by(Category.name).all(),
+        orders=orders, users=users,
+        subscriptions=Subscription.query.order_by(Subscription.expires_at.desc()).all(),
+        reviews=reviews, coupons=coupons, wishlist_count=wishlist_count, points_total=points_total,
+        revenue=revenue, costs=costs, profit=profit, avg_order=avg_order,
+        analytics_days=analytics_days, top_products=top_products,
+        active_products=Product.query.filter_by(active=True).count(),
+        active_subscriptions=Subscription.query.filter_by(active=True).count(),
+        pending_orders=Order.query.filter_by(status="pending").count(),
+        telegram_ids=telegram_admin_ids(),
+        telegram_ready=bool(os.getenv("TELEGRAM_BOT_TOKEN")),
+        audit_logs=AuditLog.query.order_by(AuditLog.created_at.desc()).limit(30).all(),
+        store_settings={x.key:x.value for x in AdminSetting.query.all()})
+
+@app.route("/admin/plan/<int:plan_id>", methods=["POST"])
+@login_required
+def edit_plan(plan_id):
+    if not admin_required(): return ("Forbidden",403)
+    p = db.session.get(Plan, plan_id)
+    p.price = float(request.form["price"])
+    sale = request.form.get("sale_price","").strip()
+    cost = request.form.get("cost_price","").strip()
+    p.sale_price = float(sale) if sale else None
+    p.cost_price = float(cost) if cost else 0.0
+    db.session.commit()
+    flash("Çmimi u ruajt.")
+    return redirect(url_for("admin"))
+
+def complete_order_record(o, source="admin"):
+    """Complete an order once, activate subscriptions and award referral points."""
+    previous = o.status
+    if previous == "completed":
+        return False
+    o.status = "completed"
+    start = datetime.utcnow()
+    plans_to_activate = []
+    if o.plan_id and o.plan:
+        plans_to_activate.append(o.plan)
+    elif o.bundle_id and o.bundle:
+        plans_to_activate.extend([item.plan for item in o.bundle.items if item.plan])
+    for plan in plans_to_activate:
+        existing = Subscription.query.filter_by(user_id=o.user_id, product_id=plan.product_id, active=True).order_by(Subscription.expires_at.desc()).first()
+        sub_start = max(start, existing.expires_at) if existing else start
+        expires = sub_start + timedelta(days=30 * max(1, plan.months))
+        if existing and existing.expires_at > start:
+            existing.expires_at = expires
+            existing.plan_id = plan.id
+            existing.order_id = o.id
+        else:
+            db.session.add(Subscription(user_id=o.user_id, product_id=plan.product_id, started_at=sub_start, expires_at=expires, active=True, plan_id=plan.id, order_id=o.id))
+    # Loyalty: award configurable points on each completed order.
+    points_per_eur = loyalty_setting("loyalty_points_per_eur", 1)
+    earned = int(max(0, round((o.sale_price or 0) * points_per_eur)))
+    if earned:
+        db.session.add(LoyaltyPoint(user_id=o.user_id, points=earned, reason=f"Purchase reward — order #{o.id}"))
+
+    ref = Referral.query.filter_by(referred_id=o.user_id, rewarded=False).first()
+    if ref and ref.referrer_id != o.user_id:
+        reward = int(loyalty_setting("referral_reward_points", os.getenv("REFERRAL_REWARD_POINTS", "100")))
+        db.session.add(LoyaltyPoint(user_id=ref.referrer_id, points=reward, reason=f"Referral reward — order #{o.id}"))
+        db.session.add(LoyaltyPoint(user_id=o.user_id, points=reward, reason=f"Referral reward — first purchase #{o.id}"))
+        ref.reward_points = reward
+        ref.rewarded = True
+    return True
+
+
+@app.route("/admin/order/<int:order_id>")
+@login_required
+def admin_order_detail(order_id):
+    if not admin_required(): return ("Forbidden",403)
+    o=db.session.get(Order, order_id)
+    if not o: return ("Not found",404)
+    return render_template("admin_order.html", order=o)
+
+@app.route("/admin/order/<int:order_id>/deliver", methods=["POST"])
+@login_required
+def admin_order_deliver(order_id):
+    if not admin_required(): return ("Forbidden",403)
+    o=db.session.get(Order, order_id)
+    if not o: return ("Not found",404)
+    content=request.form.get("content","").strip()[:10000]
+    if not content:
+        flash("Delivery content is required.")
+        return redirect(url_for("admin_order_detail", order_id=order_id))
+    existing=OrderDelivery.query.filter_by(order_id=o.id).first()
+    if existing:
+        existing.content=content
+        existing.delivered_at=datetime.utcnow()
+        existing.delivered_by_telegram_id=None
+        existing.sent_to_customer_telegram=False
+    else:
+        db.session.add(OrderDelivery(order_id=o.id, content=content, delivered_by_telegram_id=None, sent_to_customer_telegram=False))
+    previous=o.status
+    complete_order_record(o, source=f"web:{current_user.username}")
+    audit("Order delivered", f"Order #{o.id}: {previous} → completed")
+    db.session.commit()
+    flash("Delivery saved and order completed.")
+    if o.user.telegram_id:
+        sent=send_telegram_chat(o.user.telegram_id, f"✅ Veyra delivery for order #{o.id}\n\n{content}\n\nYour order is now completed.")
+        d=OrderDelivery.query.filter_by(order_id=o.id).first(); d.sent_to_customer_telegram=sent; db.session.commit()
+    return redirect(url_for("admin_order_detail", order_id=order_id))
+
+@app.route("/admin/order/<int:order_id>/resend-telegram", methods=["POST"])
+@login_required
+def admin_order_resend_telegram(order_id):
+    if not admin_required(): return ("Forbidden",403)
+    o=db.session.get(Order, order_id)
+    if not o or not o.delivery: return ("Not found",404)
+    if not o.user.telegram_id:
+        flash("Customer has no Telegram linked.")
+        return redirect(url_for("admin_order_detail", order_id=order_id))
+    sent=send_telegram_chat(o.user.telegram_id, f"📦 Veyra delivery for order #{o.id}\n\n{o.delivery.content}\n\nYour order is completed.")
+    o.delivery.sent_to_customer_telegram=sent
+    db.session.commit()
+    flash("Delivery resent to customer Telegram." if sent else "Telegram delivery failed.")
+    return redirect(url_for("admin_order_detail", order_id=order_id))
+
+@app.route("/admin/customer/<int:user_id>")
+@login_required
+def admin_customer_detail(user_id):
+    if not admin_required(): return ("Forbidden",403)
+    u=db.session.get(User,user_id)
+    if not u or u.is_admin: return ("Not found",404)
+    orders=Order.query.filter_by(user_id=u.id).order_by(Order.created_at.desc()).all()
+    subs=Subscription.query.filter_by(user_id=u.id).order_by(Subscription.expires_at.desc()).all()
+    points=db.session.query(db.func.coalesce(db.func.sum(LoyaltyPoint.points),0)).filter(LoyaltyPoint.user_id==u.id).scalar() or 0
+    wishlist_items=Wishlist.query.filter_by(user_id=u.id).all()
+    referrals=Referral.query.filter_by(referrer_id=u.id).all()
+    reviews=Review.query.filter_by(user_id=u.id).order_by(Review.created_at.desc()).all()
+    return render_template("admin_customer.html", customer=u, orders=orders, subscriptions=subs, points=points, wishlist_items=wishlist_items, referrals=referrals, reviews=reviews)
+
+@app.route("/admin/order/<int:order_id>/<status>", methods=["POST"])
+@login_required
+def order_status(order_id,status):
+    if not admin_required(): return ("Forbidden",403)
+    if status not in {"pending","processing","completed","cancelled"}: return ("Bad status",400)
+    o = db.session.get(Order,order_id)
+    if not o: return ("Not found",404)
+    previous = o.status
+    if status == "completed" and previous != "completed":
+        complete_order_record(o, source="admin")
+    else:
+        o.status = status
+    audit("Order status", f"Order #{o.id}: {previous} → {status}")
+    db.session.commit()
+    if status == "completed" and previous != "completed":
+        notify_admins(f"✅ Order #{o.id} completed\n@{o.user.username}\n€{o.sale_price:.2f}\nProfit: €{o.profit:.2f}")
+    return redirect(url_for("admin"))
+
+
+@app.route("/admin/coupon/new", methods=["POST"])
+@login_required
+def admin_coupon_new():
+    if not admin_required(): return ("Forbidden",403)
+    code = request.form.get("code", "").strip().upper()
+    if not code:
+        flash("Coupon code is required.")
+        return redirect(url_for("admin") + "#marketing")
+    percent = max(0.0, float(request.form.get("discount_percent",0) or 0))
+    fixed = max(0.0, float(request.form.get("discount_fixed",0) or 0))
+    if percent <= 0 and fixed <= 0:
+        flash("Set a percentage or fixed discount.")
+        return redirect(url_for("admin") + "#marketing")
+    if percent > 100:
+        flash("Percentage discount cannot exceed 100%.")
+        return redirect(url_for("admin") + "#marketing")
+    if Coupon.query.filter_by(code=code).first():
+        flash("Coupon already exists.")
+        return redirect(url_for("admin") + "#marketing")
+    expires_raw = request.form.get("expires_at", "").strip()
+    expires = None
+    if expires_raw:
+        try: expires = datetime.fromisoformat(expires_raw)
+        except ValueError: expires = None
+    c = Coupon(code=code, discount_percent=percent,
+               discount_fixed=fixed,
+               max_uses=int(request.form.get("max_uses",0) or 0), expires_at=expires, active=request.form.get("active")=="on")
+    db.session.add(c); audit("Coupon created", code); db.session.commit()
+    flash(f"Coupon {code} created.")
+    return redirect(url_for("admin") + "#marketing")
+
+@app.route("/admin/coupon/<int:coupon_id>/toggle", methods=["POST"])
+@login_required
+def admin_coupon_toggle(coupon_id):
+    if not admin_required(): return ("Forbidden",403)
+    c=db.session.get(Coupon,coupon_id)
+    if not c: return ("Not found",404)
+    c.active=not c.active; audit("Coupon toggled", f"{c.code} → {c.active}"); db.session.commit()
+    return redirect(url_for("admin") + "#marketing")
+
+@app.route("/admin/coupon/<int:coupon_id>/delete", methods=["POST"])
+@login_required
+def admin_coupon_delete(coupon_id):
+    if not admin_required(): return ("Forbidden",403)
+    c=db.session.get(Coupon,coupon_id)
+    if not c: return ("Not found",404)
+    db.session.delete(c); audit("Coupon deleted", c.code); db.session.commit()
+    return redirect(url_for("admin") + "#marketing")
+
+@app.route("/admin/rewards", methods=["POST"])
+@login_required
+def admin_rewards_save():
+    if not admin_required(): return ("Forbidden",403)
+    for key, default in (("loyalty_points_per_eur", "1"), ("referral_reward_points", "100")):
+        value = request.form.get(key, default).strip()
+        try:
+            number = float(value)
+            if number < 0: raise ValueError
+            if key == "referral_reward_points": value = str(int(number))
+        except ValueError:
+            flash(f"Invalid value for {key}.")
+            return redirect(url_for("admin") + "#marketing")
+        row = AdminSetting.query.filter_by(key=key).first()
+        if not row:
+            row = AdminSetting(key=key)
+            db.session.add(row)
+        row.value = value
+    audit("Rewards settings updated", "Loyalty points per EUR and referral reward")
+    db.session.commit()
+    flash("Rewards settings saved.")
+    return redirect(url_for("admin") + "#marketing")
+
+@app.route("/admin/settings", methods=["POST"])
+@login_required
+def admin_settings_save():
+    if not admin_required(): return ("Forbidden",403)
+    keys = ["store_name","support_whatsapp","support_email","maintenance_mode","default_language","hero_title_en","hero_title_de","hero_title_fr","hero_title_sq","announcement","store_logo_url","default_theme","payment_provider","stripe_publishable_key","notify_new_order","notify_payment","notify_completion","notify_expiry","notify_review","notify_referral"]
+    for key in keys:
+        value = request.form.get(key, "").strip()
+        row = AdminSetting.query.filter_by(key=key).first()
+        if not row:
+            row=AdminSetting(key=key)
+            db.session.add(row)
+        row.value=value
+    audit("Store settings updated", ", ".join(keys)); db.session.commit()
+    flash("Store settings saved.")
+    return redirect(url_for("admin") + "#settings")
+
+@app.route("/admin/telegram/save", methods=["POST"])
+@login_required
+def admin_telegram_save():
+    if not admin_required(): return ("Forbidden",403)
+    admins=User.query.filter_by(is_admin=True).order_by(User.id).limit(2).all()
+    ids=[request.form.get("admin1_telegram_id","").strip(), request.form.get("admin2_telegram_id","").strip()]
+    for i,u in enumerate(admins):
+        u.telegram_id = ids[i] or None
+    audit("Telegram admin IDs updated", "Two-admin allowlist"); db.session.commit()
+    flash("Telegram admin IDs saved. Bot token remains in environment variables for security.")
+    return redirect(url_for("admin") + "#telegram")
+
+@app.route("/admin/telegram/test", methods=["POST"])
+@login_required
+def admin_telegram_test():
+    if not admin_required(): return ("Forbidden",403)
+    ok, err = send_telegram("✅ Veyra Telegram test\nYour admin notifications are connected.")
+    flash("Telegram test sent successfully." if ok else f"Telegram test failed: {err}")
+    return redirect(url_for("admin") + "#telegram")
+
+@app.route("/admin/audit/clear", methods=["POST"])
+@login_required
+def admin_audit_clear():
+    if not admin_required(): return ("Forbidden",403)
+    AuditLog.query.delete(); audit("Audit log cleared"); db.session.commit()
+    flash("Audit log cleared.")
+    return redirect(url_for("admin") + "#activity")
+
+
+def make_slug(text):
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return slug or "product"
+
+def unique_slug(text, model=Product, current_id=None):
+    base = make_slug(text)
+    slug = base
+    n = 2
+    while True:
+        q = model.query.filter_by(slug=slug)
+        if current_id is not None:
+            q = q.filter(model.id != current_id)
+        if not q.first():
+            return slug
+        slug = f"{base}-{n}"
+        n += 1
+
+def save_product_image(file_obj):
+    if not file_obj or not getattr(file_obj, "filename", ""):
+        return ""
+    allowed = {"png","jpg","jpeg","webp","gif","svg"}
+    ext = file_obj.filename.rsplit(".",1)[-1].lower() if "." in file_obj.filename else ""
+    if ext not in allowed:
+        return ""
+    filename = secure_filename(file_obj.filename)
+    stamp = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
+    filename = f"{stamp}-{filename}"
+    file_obj.save(os.path.join(UPLOAD_DIR, filename))
+    return url_for("static", filename=f"uploads/{filename}")
+
+@app.route("/admin/product/new", methods=["POST"])
+@login_required
+def admin_product_new():
+    if not admin_required(): return ("Forbidden",403)
+    name = request.form.get("name", "").strip()
+    category = db.session.get(Category, int(request.form.get("category_id", 0) or 0))
+    if not name or not category:
+        flash("Product name and category are required.")
+        return redirect(url_for("admin"))
+    uploaded_image = save_product_image(request.files.get("image_file"))
+    p = Product(name=name, slug=unique_slug(request.form.get("slug") or name),
+                description=request.form.get("description", "").strip(),
+                image_url=uploaded_image or request.form.get("image_url", "").strip(),
+                category_id=category.id,
+                active=request.form.get("active") == "on",
+                featured=request.form.get("featured") == "on")
+    db.session.add(p); db.session.flush()
+    months = int(request.form.get("months", 1) or 1)
+    price = float(request.form.get("price", 0) or 0)
+    sale_raw = request.form.get("sale_price", "").strip()
+    cost = float(request.form.get("cost_price", 0) or 0)
+    db.session.add(Plan(product_id=p.id, name=f"{months} Month" + ("s" if months != 1 else ""),
+                        months=months, price=price,
+                        sale_price=float(sale_raw) if sale_raw else None,
+                        cost_price=cost, active=True))
+    db.session.commit()
+    flash(f"Product '{p.name}' created.")
+    return redirect(url_for("admin"))
+
+@app.route("/admin/product/<int:product_id>/edit", methods=["POST"])
+@login_required
+def admin_product_edit(product_id):
+    if not admin_required(): return ("Forbidden",403)
+    p = db.session.get(Product, product_id)
+    if not p: return ("Not found",404)
+    name = request.form.get("name", p.name).strip()
+    category_id = int(request.form.get("category_id", p.category_id) or p.category_id)
+    category = db.session.get(Category, category_id)
+    if not name or not category:
+        flash("Product name and category are required.")
+        return redirect(url_for("admin"))
+    p.name = name
+    p.slug = unique_slug(request.form.get("slug") or name, Product, p.id)
+    p.description = request.form.get("description", "").strip()
+    uploaded_image = save_product_image(request.files.get("image_file"))
+    p.image_url = uploaded_image or request.form.get("image_url", "").strip()
+    p.category_id = category.id
+    p.active = request.form.get("active") == "on"
+    p.featured = request.form.get("featured") == "on"
+    db.session.commit()
+    flash(f"Product '{p.name}' updated.")
+    return redirect(url_for("admin"))
+
+@app.route("/admin/product/<int:product_id>/delete", methods=["POST"])
+@login_required
+def admin_product_delete(product_id):
+    if not admin_required(): return ("Forbidden",403)
+    p = db.session.get(Product, product_id)
+    if not p: return ("Not found",404)
+    plan_ids = [x.id for x in p.plans]
+    has_history = Order.query.filter(Order.plan_id.in_(plan_ids)).first() if plan_ids else None
+    has_subs = Subscription.query.filter_by(product_id=p.id).first()
+    has_reviews = Review.query.filter_by(product_id=p.id).first()
+    has_wishlist = Wishlist.query.filter_by(product_id=p.id).first()
+    has_bundle = BundleItem.query.filter(BundleItem.plan_id.in_(plan_ids)).first() if plan_ids else None
+    if has_history or has_subs or has_reviews or has_wishlist or has_bundle:
+        p.active = False
+        for plan in p.plans: plan.active = False
+        db.session.commit()
+        flash(f"'{p.name}' has sales/history, so it was archived instead of deleted.")
+        return redirect(url_for("admin"))
+    db.session.delete(p)
+    db.session.commit()
+    flash("Product deleted.")
+    return redirect(url_for("admin"))
+
+@app.route("/admin/plan/new", methods=["POST"])
+@login_required
+def admin_plan_new():
+    if not admin_required(): return ("Forbidden",403)
+    product = db.session.get(Product, int(request.form.get("product_id", 0) or 0))
+    if not product: return ("Product not found",404)
+    months = int(request.form.get("months", 1) or 1)
+    label = request.form.get("name", "").strip() or f"{months} Month" + ("s" if months != 1 else "")
+    sale_raw = request.form.get("sale_price", "").strip()
+    plan = Plan(product_id=product.id, name=label, months=months,
+                price=float(request.form.get("price", 0) or 0),
+                sale_price=float(sale_raw) if sale_raw else None,
+                cost_price=float(request.form.get("cost_price", 0) or 0),
+                active=request.form.get("active") == "on")
+    db.session.add(plan); db.session.commit()
+    flash(f"Plan added to {product.name}.")
+    return redirect(url_for("admin"))
+
+@app.route("/admin/plan/<int:plan_id>/edit", methods=["POST"])
+@login_required
+def admin_plan_edit(plan_id):
+    if not admin_required(): return ("Forbidden",403)
+    plan = db.session.get(Plan, plan_id)
+    if not plan: return ("Not found",404)
+    plan.name = request.form.get("name", plan.name).strip() or plan.name
+    plan.months = int(request.form.get("months", plan.months) or plan.months)
+    plan.price = float(request.form.get("price", plan.price) or 0)
+    sale_raw = request.form.get("sale_price", "").strip()
+    plan.sale_price = float(sale_raw) if sale_raw else None
+    plan.cost_price = float(request.form.get("cost_price", plan.cost_price) or 0)
+    plan.active = request.form.get("active") == "on"
+    db.session.commit()
+    flash(f"{plan.product.name} — {plan.name} updated.")
+    return redirect(url_for("admin"))
+
+@app.route("/admin/plan/<int:plan_id>/delete", methods=["POST"])
+@login_required
+def admin_plan_delete(plan_id):
+    if not admin_required(): return ("Forbidden",403)
+    plan = db.session.get(Plan, plan_id)
+    if not plan: return ("Not found",404)
+    if Order.query.filter_by(plan_id=plan.id).first() or BundleItem.query.filter_by(plan_id=plan.id).first():
+        plan.active = False
+        db.session.commit()
+        flash(f"{plan.name} was archived because it is used in history or a bundle.")
+    else:
+        db.session.delete(plan); db.session.commit(); flash("Plan deleted.")
+    return redirect(url_for("admin"))
+
+@app.route("/admin/product/<int:product_id>/toggle", methods=["POST"])
+@login_required
+def admin_product_toggle(product_id):
+    if not admin_required(): return ("Forbidden", 403)
+    p = db.session.get(Product, product_id)
+    if not p: return ("Not found", 404)
+    p.active = not p.active
+    for plan in p.plans:
+        if p.active and not plan.active:
+            # Product visibility is independent from plan visibility; do not
+            # silently re-enable archived plans.
+            pass
+    audit("Product visibility", f"{p.name} → {'active' if p.active else 'hidden'}")
+    db.session.commit()
+    return redirect(url_for("admin") + "#products")
+
+@app.route("/admin/product/<int:product_id>/duplicate", methods=["POST"])
+@login_required
+def admin_product_duplicate(product_id):
+    if not admin_required(): return ("Forbidden", 403)
+    source = db.session.get(Product, product_id)
+    if not source: return ("Not found", 404)
+    copy = Product(name=f"{source.name} Copy", slug=unique_slug(f"{source.name}-copy"),
+                   description=source.description, image_url=source.image_url,
+                   category_id=source.category_id, active=False, featured=False)
+    db.session.add(copy); db.session.flush()
+    for plan in source.plans:
+        db.session.add(Plan(product_id=copy.id, name=plan.name, months=plan.months,
+                             price=plan.price, sale_price=plan.sale_price,
+                             cost_price=plan.cost_price, active=plan.active))
+    audit("Product duplicated", f"{source.name} → {copy.name}")
+    db.session.commit()
+    flash(f"{source.name} u kopjua si draft.")
+    return redirect(url_for("admin") + "#products")
+
+@app.route("/admin/plan/<int:plan_id>/toggle", methods=["POST"])
+@login_required
+def admin_plan_toggle(plan_id):
+    if not admin_required(): return ("Forbidden", 403)
+    plan = db.session.get(Plan, plan_id)
+    if not plan: return ("Not found", 404)
+    plan.active = not plan.active
+    audit("Plan visibility", f"{plan.product.name} / {plan.name} → {'active' if plan.active else 'hidden'}")
+    db.session.commit()
+    return redirect(url_for("admin") + "#products")
+
+@app.route("/admin/bundle/<int:bundle_id>/toggle", methods=["POST"])
+@login_required
+def admin_bundle_toggle(bundle_id):
+    if not admin_required(): return ("Forbidden", 403)
+    b = db.session.get(Bundle, bundle_id)
+    if not b: return ("Not found", 404)
+    b.active = not b.active
+    audit("Bundle visibility", f"{b.name} → {'active' if b.active else 'hidden'}")
+    db.session.commit()
+    return redirect(url_for("admin") + "#bundles")
+
+@app.route("/admin/subscription/<int:subscription_id>/<action>", methods=["POST"])
+@login_required
+def admin_subscription_action(subscription_id, action):
+    if not admin_required(): return ("Forbidden", 403)
+    sub = db.session.get(Subscription, subscription_id)
+    if not sub: return ("Not found", 404)
+    if action == "extend":
+        base = max(datetime.utcnow(), sub.expires_at)
+        sub.expires_at = base + timedelta(days=30)
+        sub.active = True
+        flash(f"{sub.product.name} u zgjat për 30 ditë.")
+    elif action == "activate":
+        sub.active = True
+        if sub.expires_at <= datetime.utcnow():
+            sub.expires_at = datetime.utcnow() + timedelta(days=30)
+        flash("Abonimi u aktivizua.")
+    elif action == "deactivate":
+        sub.active = False
+        flash("Abonimi u çaktivizua.")
+    else:
+        return ("Bad action", 400)
+    audit("Subscription action", f"#{sub.id} {action}")
+    db.session.commit()
+    return redirect(url_for("admin") + "#subscriptions")
+
+@app.route("/admin/export/orders.csv")
+@login_required
+def admin_export_orders():
+    if not admin_required(): return ("Forbidden", 403)
+    import csv, io
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow(["Order","Customer","Product","Plan","Status","Sale","Cost","Profit","Coupon","Created"])
+    for o in Order.query.order_by(Order.created_at.desc()).all():
+        product = o.plan.product.name if o.plan else (o.bundle.name if o.bundle else "")
+        plan = o.plan.name if o.plan else "Bundle"
+        writer.writerow([o.id, o.user.username, product, plan, o.status, f"{o.sale_price:.2f}",
+                         f"{o.cost_price:.2f}", f"{o.profit:.2f}", o.coupon_code or "",
+                         o.created_at.isoformat()])
+    from flask import Response
+    return Response(out.getvalue(), mimetype="text/csv",
+                    headers={"Content-Disposition":"attachment; filename=veyra-orders.csv"})
+
+@app.route("/admin/category/new", methods=["POST"])
+@login_required
+def admin_category_new():
+    if not admin_required(): return ("Forbidden",403)
+    name = request.form.get("name", "").strip()
+    if not name:
+        flash("Category name is required.")
+        return redirect(url_for("admin"))
+    slug = make_slug(request.form.get("slug") or name)
+    if Category.query.filter((Category.name == name) | (Category.slug == slug)).first():
+        flash("Category already exists.")
+        return redirect(url_for("admin"))
+    db.session.add(Category(name=name, slug=slug)); db.session.commit()
+    flash(f"Category '{name}' created.")
+    return redirect(url_for("admin"))
+
+@app.route("/admin/category/<int:category_id>/edit", methods=["POST"])
+@login_required
+def admin_category_edit(category_id):
+    if not admin_required(): return ("Forbidden",403)
+    c = db.session.get(Category, category_id)
+    if not c: return ("Not found",404)
+    c.name = request.form.get("name", c.name).strip() or c.name
+    c.slug = make_slug(request.form.get("slug") or c.name)
+    db.session.commit(); flash("Category updated.")
+    return redirect(url_for("admin"))
+
+@app.route("/admin/category/<int:category_id>/delete", methods=["POST"])
+@login_required
+def admin_category_delete(category_id):
+    if not admin_required(): return ("Forbidden",403)
+    c = db.session.get(Category, category_id)
+    if not c: return ("Not found",404)
+    if c.products:
+        flash(f"Cannot delete '{c.name}' while it still has products.")
+    else:
+        db.session.delete(c); db.session.commit(); flash("Category deleted.")
+    return redirect(url_for("admin"))
+
+@app.route("/admin/bundle/new", methods=["POST"])
+@login_required
+def admin_bundle_new():
+    if not admin_required(): return ("Forbidden",403)
+    name = request.form.get("name", "").strip()
+    if not name:
+        flash("Bundle name is required.")
+        return redirect(url_for("admin"))
+    b = Bundle(name=name, description=request.form.get("description", "").strip(),
+               price=float(request.form.get("price", 0) or 0),
+               active=request.form.get("active") == "on",
+               featured=request.form.get("featured") == "on")
+    db.session.add(b); db.session.flush()
+    for raw in request.form.getlist("plan_ids"):
+        try: pid = int(raw)
+        except ValueError: continue
+        if db.session.get(Plan, pid): db.session.add(BundleItem(bundle_id=b.id, plan_id=pid, quantity=1))
+    db.session.commit(); flash(f"Bundle '{b.name}' created.")
+    return redirect(url_for("admin"))
+
+@app.route("/admin/bundle/<int:bundle_id>/edit", methods=["POST"])
+@login_required
+def admin_bundle_edit(bundle_id):
+    if not admin_required(): return ("Forbidden",403)
+    b = db.session.get(Bundle, bundle_id)
+    if not b: return ("Not found",404)
+    b.name = request.form.get("name", b.name).strip() or b.name
+    b.description = request.form.get("description", "").strip()
+    b.price = float(request.form.get("price", b.price) or 0)
+    b.active = request.form.get("active") == "on"
+    b.featured = request.form.get("featured") == "on"
+    BundleItem.query.filter_by(bundle_id=b.id).delete(synchronize_session=False)
+    for raw in request.form.getlist("plan_ids"):
+        try: pid = int(raw)
+        except ValueError: continue
+        if db.session.get(Plan, pid): db.session.add(BundleItem(bundle_id=b.id, plan_id=pid, quantity=1))
+    db.session.commit(); flash(f"Bundle '{b.name}' updated.")
+    return redirect(url_for("admin"))
+
+@app.route("/admin/bundle/<int:bundle_id>/delete", methods=["POST"])
+@login_required
+def admin_bundle_delete(bundle_id):
+    if not admin_required(): return ("Forbidden",403)
+    b = db.session.get(Bundle, bundle_id)
+    if not b: return ("Not found",404)
+    if Order.query.filter_by(bundle_id=b.id).first():
+        b.active = False; db.session.commit(); flash("Bundle archived because it has order history.")
+    else:
+        db.session.delete(b); db.session.commit(); flash("Bundle deleted.")
+    return redirect(url_for("admin"))
+
+with app.app_context():
+    db.create_all()
+    seed()
+    start_telegram_bot()
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT",5000)), debug=True)
