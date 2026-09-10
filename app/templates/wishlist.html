@@ -1,0 +1,14 @@
+{% extends "base.html" %}{% block content %}
+<div class="account-wrap">
+  <span class="eyebrow">{{tr('Wishlist')}}</span>
+  <h1>{{tr('Saved products')}}</h1>
+  <div class="product-grid">
+    {% for item in items %}{% set p=item.product %}
+    <a class="product-card" href="/product/{{p.slug}}">
+      <div class="product-logo-wrap"><img src="{{product_logo(p)}}" alt="{{p.name}}" onerror="this.style.display='none';this.nextElementSibling.style.display='grid'"><span class="logo-fallback">{{p.name[:1]}}</span></div>
+      <div class="product-meta"><span>{{p.category.name}}</span><b>{{p.name}}</b><small>{{tr('View Product')}} →</small></div>
+    </a>
+    {% else %}<div class="empty-admin">{{tr('Your wishlist is empty.')}}</div>{% endfor %}
+  </div>
+</div>
+{% endblock %}

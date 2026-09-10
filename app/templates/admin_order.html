@@ -1,0 +1,12 @@
+{% extends "base.html" %}{% block content %}
+<div class="account-wrap">
+  <a class="soft-btn" href="/admin#orders">← Back to orders</a>
+  <span class="eyebrow" style="display:block;margin-top:20px">ORDER #{{order.id}}</span>
+  <h1>{{order.plan.product.name + ' · ' + order.plan.name if order.plan else order.bundle.name}}</h1>
+  <div class="account-grid">
+    <section class="panel"><h2>Order</h2><div class="row-card"><div><b>@{{order.user.username}}</b><small class="muted">{{order.user.email}}</small><small class="muted">{{order.created_at.strftime('%d.%m.%Y %H:%M')}}</small></div><div><b>€{{'%.2f'|format(order.sale_price)}}</b><small class="muted">Cost €{{'%.2f'|format(order.cost_price)}} · Profit €{{'%.2f'|format(order.profit)}}</small><span class="status {% if order.status=='completed' %}live{% endif %}">{{order.status}}</span></div></div><p><a class="soft-btn" href="/admin/customer/{{order.user.id}}">Open customer</a></p></section>
+    <section class="panel"><h2>Customer Telegram</h2><p class="muted">{{order.user.telegram_id or 'Not linked'}}</p>{% if order.user.telegram_id and order.delivery %}<form method="post" action="/admin/order/{{order.id}}/resend-telegram"><button class="soft-btn">✈ Resend delivery</button></form>{% endif %}</section>
+  </div>
+  <section class="panel" style="margin-top:18px"><h2>Delivery</h2>{% if order.delivery %}<div class="delivery-box"><pre>{{order.delivery.content}}</pre><small class="muted">{{order.delivery.delivered_at.strftime('%d.%m.%Y %H:%M')}} · Telegram sent: {{'Yes' if order.delivery.sent_to_customer_telegram else 'No'}}</small></div>{% endif %}
+  <form method="post" action="/admin/order/{{order.id}}/deliver" style="margin-top:14px"><label>Delivery content<textarea name="content" rows="8" placeholder="Account details, activation code, credentials, instructions...">{{order.delivery.content if order.delivery else ''}}</textarea></label><button class="nav-cta">{% if order.delivery %}Update & complete{% else %}Save delivery & complete{% endif %}</button></form></section>
+</div>{% endblock %}

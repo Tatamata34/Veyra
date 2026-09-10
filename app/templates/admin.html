@@ -1,0 +1,206 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="admin-v2">
+  <aside class="admin-v2-side">
+    <div class="admin-v2-brand">
+      <span class="admin-v2-logo">V</span>
+      <div><strong>{{store_name}} Admin</strong><small>{{tr('Control center')}}</small></div>
+    </div>
+    <nav>
+      <a class="active" href="#dashboard">⌂ <span>{{tr('Dashboard')}}</span></a>
+      <a href="#products">▣ <span>{{tr('Products')}}</span><b>{{products|length}}</b></a>
+      <a href="#analytics">◒ <span>{{tr('Analytics')}}</span></a>
+      <a href="#bundles">▦ <span>{{tr('Bundles')}}</span><b>{{bundles|length}}</b></a>
+      <a href="#orders">◷ <span>{{tr('Orders')}}</span>{% if pending_orders %}<b class="nav-alert">{{pending_orders}}</b>{% endif %}</a>
+      <a href="#customers">♙ <span>{{tr('Customers')}}</span><b>{{users|length}}</b></a>
+      <a href="#subscriptions">◉ <span>{{tr('Subscriptions')}}</span><b>{{subscriptions|length}}</b></a>
+      <a href="#marketing">◇ <span>{{tr('Marketing')}}</span></a>
+      <a href="#telegram">✈ <span>{{tr('Telegram')}}</span></a>
+      <a href="#settings">⚙ <span>{{tr('Settings')}}</span></a>
+      <a href="#activity">≡ <span>{{tr('Activity')}}</span></a>
+    </nav>
+    <a class="admin-store-link" href="/">← {{tr('View store')}}</a>
+  </aside>
+
+  <div class="admin-v2-main">
+    <section id="dashboard" class="admin-v2-top">
+      <div>
+        <span class="eyebrow">Veyra Control Center</span>
+        <h1>{{tr('Good control. Less work.')}}</h1>
+        <p>{{tr('Run products, prices, offers, orders and customers without touching code.')}}</p>
+      </div>
+      <div class="admin-top-actions">
+        <a class="soft-btn" href="#products">+ {{tr('Product')}}</a>
+        <a class="nav-cta" href="#bundles">+ {{tr('Bundle')}}</a>
+      </div>
+    </section>
+
+    <section class="admin-kpis">
+      <div class="admin-kpi"><span>Sales</span><strong>€{{'%.2f'|format(revenue)}}</strong><small>Non-cancelled orders</small></div>
+      <div class="admin-kpi"><span>Cost</span><strong>€{{'%.2f'|format(costs)}}</strong><small>Acquisition cost</small></div>
+      <div class="admin-kpi profit"><span>Profit</span><strong>€{{'%.2f'|format(profit)}}</strong><small>Sales − cost</small></div>
+      <div class="admin-kpi"><span>Orders</span><strong>{{orders|length}}</strong><small>{{pending_orders}} pending</small></div>
+      <div class="admin-kpi"><span>Customers</span><strong>{{users|length}}</strong><small>Registered</small></div>
+      <div class="admin-kpi"><span>Active subscriptions</span><strong>{{active_subscriptions}}</strong><small>Live now</small></div>
+    </section>
+
+    <section id="analytics" class="admin-card admin-anchor analytics-v6">
+      <div class="admin-section-head"><div><span class="eyebrow">ANALYTICS</span><h2>{{tr('Analytics')}}</h2><p>{{tr('See sales, profit and order trends without leaving the control center.')}}</p></div><span class="admin-count">14 {{tr('days')}}</span></div>
+      <div class="analytics-kpis"><div><span>{{tr('Average order')}}</span><b>€{{'%.2f'|format(avg_order)}}</b></div><div><span>{{tr('Net profit margin')}}</span><b>{{'%.1f'|format((profit / revenue * 100) if revenue else 0)}}%</b></div><div><span>{{tr('Wishlist items')}}</span><b>{{wishlist_count}}</b></div><div><span>{{tr('Points issued')}}</span><b>{{points_total}}</b></div></div>
+      <div class="analytics-grid-v6">
+        <div class="analytics-panel-v6"><div class="panel-title-v6"><b>{{tr('Sales — last 14 days')}}</b><small>{{tr('Non-cancelled orders')}}</small></div><div class="sales-bars-v6">{% set max_sales=analytics_days|map(attribute='sales')|max %}{% for d in analytics_days %}<div class="bar-col-v6" title="{{d.label}} · €{{'%.2f'|format(d.sales)}}"><span style="height:{{(d.sales / max_sales * 100) if max_sales else 2}}%"></span><small>{{d.label}}</small></div>{% endfor %}</div></div>
+        <div class="analytics-panel-v6"><div class="panel-title-v6"><b>{{tr('Top products')}}</b><small>{{tr('By recorded sales')}}</small></div><div class="top-products-v6">{% for name,total in top_products %}{% set max_top=top_products[0][1] if top_products else 1 %}<div><span>{{name}}</span><div><i style="width:{{(total/max_top*100) if max_top else 0}}%"></i></div><b>€{{'%.2f'|format(total)}}</b></div>{% else %}<p class="empty-admin">{{tr('No sales yet.')}}</p>{% endfor %}</div></div>
+      </div>
+    </section>
+
+    <section class="admin-quick-grid">
+      <a href="#products"><i>＋</i><span><b>{{tr('Add product')}}</b><small>Logo, category, plans & pricing</small></span></a>
+      <a href="#bundles"><i>▦</i><span><b>{{tr('Add bundle')}}</b><small>Combine plans with one price</small></span></a>
+      <a href="#orders"><i>◷</i><span><b>{{tr('Manage orders')}}</b><small>Status & delivery</small></span></a>
+      <a href="/admin/export/orders.csv"><i>⇩</i><span><b>Export CSV</b><small>Download order history</small></span></a>
+    </section>
+
+    <section id="products" class="admin-card admin-anchor">
+      <div class="admin-section-head">
+        <div><span class="eyebrow">CATALOG</span><h2>{{tr('Products')}}</h2><p>Manage every product, logo, visibility and pricing from one clean place.</p></div>
+        <span class="admin-count">{{products|length}} products</span>
+      </div>
+
+      <details class="admin-create" open>
+        <summary><span>＋</span><div><b>{{tr('Create product')}}</b><small>Add a new product and its first plan</small></div><em>⌄</em></summary>
+        <form class="admin-form-grid" method="post" action="/admin/product/new" enctype="multipart/form-data">
+          <label>Name<input name="name" placeholder="Netflix" required></label>
+          <label>Category<select name="category_id">{% for c in categories %}<option value="{{c.id}}">{{c.name}}</option>{% endfor %}</select></label>
+          <label>Slug<input name="slug" placeholder="netflix"></label>
+          <label>Short description<input name="description" placeholder="Premium digital subscription"></label>
+          <label>Logo / image URL<input name="image_url" placeholder="https://..."></label>
+          <label>Upload logo<input type="file" name="image_file" accept="image/png,image/jpeg,image/webp,image/svg+xml"></label>
+          <label>Months<input name="months" type="number" min="1" value="1"></label>
+          <label>Public price (€)<input name="price" type="number" min="0" step="0.01" value="0"></label>
+          <label>Sale price (€)<input name="sale_price" type="number" min="0" step="0.01" placeholder="Optional"></label>
+          <label>Acquisition cost (€)<input name="cost_price" type="number" min="0" step="0.01" value="0"></label>
+          <label class="check-line"><input type="checkbox" name="active" checked> Visible in shop</label>
+          <label class="check-line"><input type="checkbox" name="featured"> Featured product</label>
+          <div class="form-submit"><button class="nav-cta">＋ {{tr('Create product')}}</button></div>
+        </form>
+      </details>
+
+      <div class="admin-product-list">
+      {% for p in products %}
+        <details class="admin-product" {% if loop.first %}open{% endif %}>
+          <summary>
+            <span class="admin-product-logo">{% if product_logo(p) %}<img src="{{product_logo(p)}}" alt="{{p.name}}">{% else %}<b>{{p.name[:1]}}</b>{% endif %}</span>
+            <span class="admin-product-title"><b>{{p.name}}</b><small>{{p.category.name}} · {{p.plans|length}} plans</small></span>
+            <span class="admin-product-meta"><em class="status {% if p.active %}live{% endif %}">{{tr('Live') if p.active else tr('Hidden')}}</em><span>⌄</span></span>
+          </summary>
+          <div class="admin-product-body">
+            <div class="admin-inline-actions">
+              <form method="post" action="/admin/product/{{p.id}}/toggle"><button class="mini">{{'Hide' if p.active else 'Show'}}</button></form>
+              <form method="post" action="/admin/product/{{p.id}}/duplicate"><button class="mini">Duplicate</button></form>
+              <form method="post" action="/admin/product/{{p.id}}/delete"><button class="mini danger" onclick="return confirm('Remove or archive this product?')">Remove / Archive</button></form>
+            </div>
+            <form class="admin-form-grid compact" method="post" action="/admin/product/{{p.id}}/edit" enctype="multipart/form-data">
+              <label>Name<input name="name" value="{{p.name}}" required></label>
+              <label>Category<select name="category_id">{% for c in categories %}<option value="{{c.id}}" {% if c.id==p.category_id %}selected{% endif %}>{{c.name}}</option>{% endfor %}</select></label>
+              <label>Slug<input name="slug" value="{{p.slug}}"></label>
+              <label>Description<input name="description" value="{{p.description}}"></label>
+              <label>Logo / image URL<input name="image_url" value="{{p.image_url}}"></label>
+              <label>Replace logo<input type="file" name="image_file" accept="image/png,image/jpeg,image/webp,image/svg+xml"></label>
+              <label class="check-line"><input type="checkbox" name="active" {% if p.active %}checked{% endif %}> Visible</label>
+              <label class="check-line"><input type="checkbox" name="featured" {% if p.featured %}checked{% endif %}> Featured</label>
+              <div class="form-submit"><button class="soft-btn">{{tr('Save product')}}</button></div>
+            </form>
+
+            <div class="plans-panel">
+              <div class="plans-panel-head"><div><b>{{tr('Plans & pricing')}}</b><small>Public price · sale price · your cost · status</small></div><span>{{p.plans|length}}</span></div>
+              {% for plan in p.plans %}
+              <div class="plan-row">
+                <form method="post" action="/admin/plan/{{plan.id}}/edit" class="plan-row-form">
+                  <input name="name" value="{{plan.name}}" title="Plan name">
+                  <input name="months" type="number" min="1" value="{{plan.months}}" title="Months">
+                  <input name="price" type="number" min="0" step="0.01" value="{{plan.price}}" title="Public price">
+                  <input name="sale_price" type="number" min="0" step="0.01" value="{{plan.sale_price if plan.sale_price is not none else ''}}" placeholder="Sale" title="Sale price">
+                  <input name="cost_price" type="number" min="0" step="0.01" value="{{plan.cost_price}}" placeholder="Cost" title="Cost">
+                  <label class="tiny-check"><input type="checkbox" name="active" {% if plan.active %}checked{% endif %}> On</label>
+                  <button class="mini save">Save</button>
+                </form>
+                <div class="plan-row-actions">
+                  <form method="post" action="/admin/plan/{{plan.id}}/toggle"><button class="mini">{{'Hide' if plan.active else 'Show'}}</button></form>
+                  <form method="post" action="/admin/plan/{{plan.id}}/delete"><button class="mini danger" onclick="return confirm('Remove this plan?')">×</button></form>
+                </div>
+              </div>
+              {% endfor %}
+              <form method="post" action="/admin/plan/new" class="plan-add-row">
+                <input type="hidden" name="product_id" value="{{p.id}}">
+                <input name="name" placeholder="New plan">
+                <input name="months" type="number" min="1" value="1">
+                <input name="price" type="number" min="0" step="0.01" placeholder="Price">
+                <input name="sale_price" type="number" min="0" step="0.01" placeholder="Sale">
+                <input name="cost_price" type="number" min="0" step="0.01" placeholder="Cost">
+                <label class="tiny-check"><input type="checkbox" name="active" checked> On</label>
+                <button class="nav-cta">＋ Add plan</button>
+              </form>
+            </div>
+          </div>
+        </details>
+      {% endfor %}
+      </div>
+    </section>
+
+    <section id="bundles" class="admin-card admin-anchor">
+      <div class="admin-section-head"><div><span class="eyebrow">OFFERS</span><h2>{{tr('Bundles')}}</h2><p>Choose plans, set a special price and see the real bundle cost/profit.</p></div><span class="admin-count">{{bundles|length}} bundles</span></div>
+      <form class="bundle-create-v2" method="post" action="/admin/bundle/new">
+        <div class="bundle-create-head"><span class="bundle-icon">%</span><div><b>Create bundle</b><small>Example: Netflix + Spotify</small></div></div>
+        <div class="admin-form-grid compact"><label>Name<input name="name" placeholder="Netflix + Spotify Bundle" required></label><label>Special price (€)<input name="price" type="number" min="0" step="0.01" required></label><label class="wide">Description<input name="description" placeholder="Two services, one better price"></label></div>
+        <div class="plan-picker"><b>Choose plans</b><div>{% for plan in plans %}<label><input type="checkbox" name="plan_ids" value="{{plan.id}}"><span>{{plan.product.name}} · {{plan.name}} · €{{'%.2f'|format(plan.sale_price if plan.sale_price is not none else plan.price)}}</span></label>{% endfor %}</div></div>
+        <div class="bundle-create-bottom"><label class="check-line"><input type="checkbox" name="active" checked> Visible</label><label class="check-line"><input type="checkbox" name="featured"> Featured</label><button class="nav-cta">＋ Create bundle</button></div>
+      </form>
+      <div class="bundle-list-v2">
+      {% for b in bundles %}
+        {% set bundle_cost = b.items|sum(attribute='quantity') %}
+        <details class="admin-bundle">
+          <summary><span class="bundle-icon">%</span><span><b>{{b.name}}</b><small>{{b.items|length}} items · €{{'%.2f'|format(b.price)}}</small></span><em class="status {% if b.active %}live{% endif %}">{{tr('Live') if b.active else tr('Hidden')}}</em><span>⌄</span></summary>
+          <div class="admin-bundle-body">
+            <div class="bundle-items">{% for item in b.items %}<span>{% if product_logo(item.plan.product) %}<img src="{{product_logo(item.plan.product)}}" alt="">{% endif %}{{item.plan.product.name}} · {{item.plan.name}}</span>{% endfor %}</div>
+            <form class="admin-form-grid compact" method="post" action="/admin/bundle/{{b.id}}/edit">
+              <label>Name<input name="name" value="{{b.name}}"></label><label>Special price<input name="price" type="number" min="0" step="0.01" value="{{b.price}}"></label><label class="wide">Description<input name="description" value="{{b.description}}"></label>
+              <div class="plan-picker wide"><b>Included plans</b><div>{% for plan in plans %}<label><input type="checkbox" name="plan_ids" value="{{plan.id}}" {% if plan.id in b.items|map(attribute='plan_id')|list %}checked{% endif %}><span>{{plan.product.name}} · {{plan.name}}</span></label>{% endfor %}</div></div>
+              <label class="check-line"><input type="checkbox" name="active" {% if b.active %}checked{% endif %}> Visible</label><label class="check-line"><input type="checkbox" name="featured" {% if b.featured %}checked{% endif %}> Featured</label>
+              <div class="form-submit"><button class="soft-btn">Save bundle</button></div>
+            </form>
+            <div class="admin-inline-actions"><form method="post" action="/admin/bundle/{{b.id}}/toggle"><button class="mini">{{'Hide' if b.active else 'Show'}}</button></form><form method="post" action="/admin/bundle/{{b.id}}/delete"><button class="mini danger" onclick="return confirm('Remove or archive this bundle?')">Remove / Archive</button></form></div>
+          </div>
+        </details>
+      {% else %}<div class="empty-admin">No bundles yet.</div>{% endfor %}
+      </div>
+    </section>
+
+    <section id="orders" class="admin-card admin-anchor">
+      <div class="admin-section-head"><div><span class="eyebrow">SALES</span><h2>{{tr('Orders')}}</h2><p>Process orders and complete delivery from the same control center.</p></div><a class="soft-btn" href="/admin/export/orders.csv">⇩ CSV</a></div>
+      <div class="orders-v2">
+        {% for o in orders[:30] %}
+        <a href="/admin/order/{{o.id}}" class="order-v2"><div class="order-id"><b>#{{o.id}}</b><small>{{o.created_at.strftime('%d.%m.%Y %H:%M')}}</small></div><div><b>@{{o.user.username}}</b><small>{{o.plan.product.name + ' · ' + o.plan.name if o.plan else o.bundle.name}}</small></div><div class="order-money"><b>€{{'%.2f'|format(o.sale_price)}}</b><small>Profit €{{'%.2f'|format(o.profit)}}</small></div><div class="order-status"><span class="status {% if o.status=='completed' %}live{% endif %}">{{o.status}}</span><div class="order-actions">{% if o.status!='processing' and o.status!='completed' %}<form method="post" action="/admin/order/{{o.id}}/processing"><button class="mini">Process</button></form>{% endif %}{% if o.status!='completed' and o.status!='cancelled' %}<form method="post" action="/admin/order/{{o.id}}/completed"><button class="mini save">Complete</button></form>{% endif %}{% if o.status!='cancelled' and o.status!='completed' %}<form method="post" action="/admin/order/{{o.id}}/cancelled"><button class="mini danger">×</button></form>{% endif %}</div></div></a>
+        {% else %}<div class="empty-admin">No orders yet.</div>{% endfor %}
+      </div>
+    </section>
+
+    <section id="customers" class="admin-card admin-anchor"><div class="admin-section-head"><div><span class="eyebrow">CUSTOMERS</span><h2>{{tr('Customers')}}</h2><p>Accounts, Telegram connections and customer activity.</p></div></div><div class="customer-grid-v2">{% for u in users[:30] %}<a href="/admin/customer/{{u.id}}" class="customer-v2"><span class="avatar">{{u.username[:1]|upper}}</span><div><b>@{{u.username}}</b><small>{{u.email}}</small><small>{{'Telegram linked' if u.telegram_id else 'Telegram not linked'}}</small></div><span>→</span></a>{% else %}<div class="empty-admin">No customers yet.</div>{% endfor %}</div></section>
+
+    <section id="subscriptions" class="admin-card admin-anchor"><div class="admin-section-head"><div><span class="eyebrow">ACCESS</span><h2>{{tr('Subscriptions')}}</h2><p>Extend, activate or deactivate customer access without touching the database.</p></div></div><div class="subscriptions-v2">{% for s in subscriptions[:50] %}<div class="sub-v2"><div><b>@{{s.user.username}}</b><small>{{s.product.name}}</small></div><div><span class="status {% if s.active and s.expires_at > now %}live{% endif %}">{{'Active' if s.active and s.expires_at > now else 'Expired'}}</span><small>{{s.expires_at.strftime('%d.%m.%Y %H:%M')}}</small></div><div class="order-actions"><form method="post" action="/admin/subscription/{{s.id}}/extend"><button class="mini">+30d</button></form><form method="post" action="/admin/subscription/{{s.id}}/{{'deactivate' if s.active else 'activate'}}"><button class="mini">{{'Disable' if s.active else 'Activate'}}</button></form></div></div>{% else %}<div class="empty-admin">No subscriptions yet.</div>{% endfor %}</div></section>
+
+    <section id="marketing" class="admin-card admin-anchor"><div class="admin-section-head"><div><span class="eyebrow">GROWTH</span><h2>{{tr('Marketing')}}</h2><p>Coupons, reviews, wishlist, loyalty and referral controls.</p></div></div><div class="marketing-grid-v2"><div><b>Coupons</b><small>Create a percentage or fixed discount. Each customer can use a coupon once.</small><form method="post" action="/admin/coupon/new" class="mini-form"><input name="code" placeholder="SAVE10" required><input name="discount_percent" type="number" min="0" max="100" step="0.01" placeholder="%"><input name="discount_fixed" type="number" min="0" step="0.01" placeholder="€"><input name="max_uses" type="number" min="0" value="0" placeholder="Max uses"><input name="expires_at" type="datetime-local"><button class="nav-cta">Create</button></form>{% for c in coupons[:10] %}<div class="coupon-row"><div><b>{{c.code}}</b><small>{{c.used_count}} / {{c.max_uses or '∞'}}{% if c.expires_at %} · {{c.expires_at.strftime('%d.%m.%Y')}}{% endif %}</small></div><form method="post" action="/admin/coupon/{{c.id}}/toggle"><button class="mini">{{'Disable' if c.active else 'Enable'}}</button></form><form method="post" action="/admin/coupon/{{c.id}}/delete"><button class="mini danger">×</button></form></div>{% endfor %}</div><div><b>Reviews</b><small>Approve customer reviews before they appear publicly. Customers can submit one review per product.</small>{% for r in reviews[:10] %}<div class="review-row"><span>★{{r.rating}}</span><b>{{r.product.name}}</b><small>@{{r.user.username}}</small>{% if not r.approved %}<form method="post" action="/admin/review/{{r.id}}/approve"><button class="mini save">Approve</button></form><form method="post" action="/admin/review/{{r.id}}/reject"><button class="mini danger">Reject</button></form>{% else %}<span class="status live">Approved</span>{% endif %}</div>{% else %}<div class="empty-admin">No reviews yet.</div>{% endfor %}</div><div><b>Loyalty & referrals</b><small>Reward customers automatically when completed orders are delivered.</small><form method="post" action="/admin/rewards" class="mini-form"><input name="loyalty_points_per_eur" type="number" min="0" step="0.1" value="{{store_settings.get('loyalty_points_per_eur','1')}}" placeholder="Points / €"><input name="referral_reward_points" type="number" min="0" step="1" value="{{store_settings.get('referral_reward_points','100')}}" placeholder="Referral points"><button class="nav-cta">Save rewards</button></form><div class="coupon-row"><span>Wishlist items</span><b>{{wishlist_count}}</b></div><div class="coupon-row"><span>Total points issued</span><b>{{points_total}}</b></div></div></div></section>
+
+    <section id="telegram" class="admin-card admin-anchor"><div class="admin-section-head"><div><span class="eyebrow">AUTOMATION</span><h2>{{tr('Telegram')}}</h2><p>Exactly two admin Telegram IDs. Use the bot for orders, delivery and live confirmations.</p></div><span class="status {% if telegram_ready and telegram_ids|length==2 %}live{% endif %}">{{'Ready' if telegram_ready and telegram_ids|length==2 else 'Not configured'}}</span></div><form class="telegram-v2" method="post" action="/admin/telegram/save"><label>Admin 1 Telegram ID<input name="admin1_telegram_id" value="{{telegram_ids[0] if telegram_ids|length>0 else ''}}" placeholder="123456789"></label><label>Admin 2 Telegram ID<input name="admin2_telegram_id" value="{{telegram_ids[1] if telegram_ids|length>1 else ''}}" placeholder="987654321"></label><button class="nav-cta">Save IDs</button></form><form method="post" action="/admin/telegram/test" style="margin-top:12px"><button class="soft-btn">✈ Send test notification</button></form><div class="telegram-command-grid"><span>/orders<small>Pending orders</small></span><span>/deliver<small>Send delivery</small></span><span>/stats<small>Store stats</small></span><span>/cancel<small>Cancel draft</small></span></div></section>
+
+    <section id="settings" class="admin-card admin-anchor"><div class="admin-section-head"><div><span class="eyebrow">STORE</span><h2>{{tr('Settings')}}</h2><p>Global name, contact, language, hero and theme settings.</p></div></div><form method="post" action="/admin/settings" class="settings-v2"><label>Store name<input name="store_name" value="{{store_settings.get('store_name','Veyra')}}"></label><label>Support WhatsApp<input name="support_whatsapp" value="{{store_settings.get('support_whatsapp','')}}"></label><label>Support email<input name="support_email" value="{{store_settings.get('support_email','')}}"></label><label>Default language<select name="default_language"><option value="en">English</option><option value="de">Deutsch</option><option value="fr">Français</option><option value="sq">Shqip</option></select></label><label class="wide">Announcement<input name="announcement" value="{{store_settings.get('announcement','')}}"></label><label class="wide">Store logo URL<input name="store_logo_url" value="{{store_settings.get('store_logo_url','')}}"></label><label class="wide">Hero title — English<input name="hero_title_en" value="{{store_settings.get('hero_title_en','More possibilities. Less spending.')}}"></label><label class="wide">Hero title — German<input name="hero_title_de" value="{{store_settings.get('hero_title_de','Mehr Möglichkeiten. Weniger Ausgaben.')}}"></label><label class="wide">Hero title — French<input name="hero_title_fr" value="{{store_settings.get('hero_title_fr','Plus de possibilités. Moins de dépenses.')}}"></label><label class="wide">Hero title — Albanian<input name="hero_title_sq" value="{{store_settings.get('hero_title_sq','Më shumë mundësi. Më pak shpenzime.')}}"></label><label>Theme<select name="default_theme"><option value="clean" {% if store_settings.get('default_theme','clean')=='clean' %}selected{% endif %}>Clean</option><option value="glass" {% if store_settings.get('default_theme')=='glass' %}selected{% endif %}>Glass</option><option value="dark" {% if store_settings.get('default_theme')=='dark' %}selected{% endif %}>Dark</option><option value="neon" {% if store_settings.get('default_theme')=='neon' %}selected{% endif %}>Neon</option></select></label><label>Payment provider<select name="payment_provider"><option value="whatsapp" {% if store_settings.get('payment_provider','whatsapp')=='whatsapp' %}selected{% endif %}>WhatsApp / Manual</option><option value="stripe" {% if store_settings.get('payment_provider')=='stripe' %}selected{% endif %}>Stripe (ready)</option></select></label><label class="wide">Stripe publishable key<input name="stripe_publishable_key" value="{{store_settings.get('stripe_publishable_key','')}}" placeholder="pk_live_..." autocomplete="off"></label><div class="notify-box wide"><b>Notification controls</b><small>Choose which events can trigger admin notifications.</small><div class="notify-grid"><label><input type="checkbox" name="notify_new_order" value="on" {% if store_settings.get('notify_new_order','on')=='on' %}checked{% endif %}> New order</label><label><input type="checkbox" name="notify_payment" value="on" {% if store_settings.get('notify_payment','on')=='on' %}checked{% endif %}> Payment</label><label><input type="checkbox" name="notify_completion" value="on" {% if store_settings.get('notify_completion','on')=='on' %}checked{% endif %}> Completion</label><label><input type="checkbox" name="notify_expiry" value="on" {% if store_settings.get('notify_expiry','on')=='on' %}checked{% endif %}> Expiry</label><label><input type="checkbox" name="notify_review" value="on" {% if store_settings.get('notify_review','on')=='on' %}checked{% endif %}> Reviews</label><label><input type="checkbox" name="notify_referral" value="on" {% if store_settings.get('notify_referral','on')=='on' %}checked{% endif %}> Referrals</label></div></div><label class="check-line"><input type="checkbox" name="maintenance_mode" value="on" {% if store_settings.get('maintenance_mode')=='on' %}checked{% endif %}> Maintenance mode</label><div class="form-submit"><button class="nav-cta">Save settings</button></div></form></section>
+
+    <section id="activity" class="admin-card admin-anchor"><div class="admin-section-head"><div><span class="eyebrow">SECURITY</span><h2>{{tr('Activity')}}</h2><p>Every important admin change is recorded here.</p></div><form method="post" action="/admin/audit/clear"><button class="mini danger" onclick="return confirm('Clear activity log?')">Clear log</button></form></div><div class="activity-v2">{% for log in audit_logs %}<div><span>{{log.created_at.strftime('%d.%m %H:%M')}}</span><b>{{log.action}}</b><small>{{log.details}}</small></div>{% else %}<div class="empty-admin">No activity yet.</div>{% endfor %}</div></section>
+  </div>
+</div>
+<script>
+// Keep the admin navigation feeling like a real app: one active section at a time.
+const adminLinks=[...document.querySelectorAll('.admin-v2-side nav a')];
+const adminSections=[...document.querySelectorAll('.admin-anchor')];
+const markAdmin=()=>{let best='dashboard';for(const s of adminSections){if(s.getBoundingClientRect().top<180)best=s.id}adminLinks.forEach(a=>a.classList.toggle('active',a.getAttribute('href')==='#'+best))};window.addEventListener('scroll',markAdmin,{passive:true});markAdmin();
+</script>
+{% endblock %}
