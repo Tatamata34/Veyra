@@ -511,14 +511,17 @@ def telegram_api(method, payload=None):
         app.logger.warning("Telegram API %s error: %s", method, exc)
     return None
 
-def send_telegram(message):
+def send_telegram(message, reply_markup=None):
     ids = telegram_admin_ids()
     if not os.getenv("TELEGRAM_BOT_TOKEN", "").strip() or len(ids) != 2:
         return False, "Telegram bot token and exactly two admin Telegram IDs are required."
     ok = False
     errors = []
     for chat_id in ids:
-        result = telegram_api("sendMessage", {"chat_id": chat_id, "text": message})
+        payload = {"chat_id": chat_id, "text": message}
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+        result = telegram_api("sendMessage", payload)
         if result and result.get("ok"):
             ok = True
         else:
@@ -659,6 +662,45 @@ def customer_orders_keyboard(user_id):
         rows.append([{"text": f"#{o.id} · {item[:28]}", "callback_data": f"custorder:{o.id}"}])
     return {"inline_keyboard": rows} if rows else None
 
+def customer_products_keyboard():
+    products = Product.query.filter_by(active=True).order_by(Product.featured.desc(), Product.name).limit(30).all()
+    rows = []
+    for p in products:
+        plans = [x for x in p.plans if x.active]
+        if plans:
+            rows.append([{"text": f"🛍 {p.name}", "callback_data": f"custproduct:{p.id}"}])
+    return {"inline_keyboard": rows} if rows else None
+
+def customer_plan_keyboard(product_id):
+    p = db.session.get(Product, product_id)
+    if not p or not p.active:
+        return None
+    rows = []
+    for plan in sorted([x for x in p.plans if x.active], key=lambda x: (x.months, x.id)):
+        price = plan.sale_price if plan.sale_price is not None else plan.price
+        rows.append([{"text": f"📅 {plan.name} — €{price:.2f}", "callback_data": f"buyplan:{plan.id}"}])
+    rows.append([{"text": "⬅️ Products", "callback_data": "cust_products"}])
+    return {"inline_keyboard": rows} if rows else None
+
+def send_customer_products(chat_id):
+    kb = customer_products_keyboard()
+    if kb:
+        send_telegram_chat(chat_id, "🛍 Veyra Products\n\nChoose a product to see plans and buy:", kb)
+    else:
+        send_telegram_chat(chat_id, "📭 No products are available right now.")
+
+def create_telegram_order(user, plan):
+    selling_price = plan.sale_price if plan.sale_price is not None else plan.price
+    cost = plan.cost_price or 0.0
+    o = Order(user_id=user.id, plan_id=plan.id, sale_price=selling_price, cost_price=cost, profit=selling_price-cost)
+    db.session.add(o)
+    db.session.flush()
+    audit_note = f"Order #{o.id} created from Telegram for @{user.username} — {plan.product.name} / {plan.name}"
+    app.logger.info(audit_note)
+    db.session.commit()
+    notify_admins(customer_order_notification(o), "new_order", o)
+    return o
+
 def customer_subscriptions_text(user_id):
     subs=Subscription.query.filter_by(user_id=user_id).order_by(Subscription.expires_at.desc()).all()
     if not subs: return "📭 No subscriptions yet."
@@ -704,6 +746,54 @@ def telegram_handle_update(update):
             return
         if data == "cust_products":
             with app.app_context():
+                customer = customer_telegram_user(chat_id)
+                if not customer:
+                    send_telegram_chat(chat_id, "⛔ Connect your Veyra account first.")
+                else:
+                    send_customer_products(chat_id)
+            telegram_api("answerCallbackQuery", {"callback_query_id": cq.get("id")})
+            return
+        if data.startswith("custproduct:"):
+            with app.app_context():
+                customer = customer_telegram_user(chat_id)
+                try:
+                    product_id = int(data.split(":", 1)[1])
+                except ValueError:
+                    product_id = 0
+                product = db.session.get(Product, product_id)
+                kb = customer_plan_keyboard(product_id) if customer else None
+                if not customer:
+                    send_telegram_chat(chat_id, "⛔ Connect your Veyra account first.")
+                elif not product or not product.active or not kb:
+                    send_telegram_chat(chat_id, "❌ Product is no longer available.")
+                else:
+                    send_telegram_chat(chat_id, f"📦 {product.name}\n\nChoose your plan:", kb)
+            telegram_api("answerCallbackQuery", {"callback_query_id": cq.get("id")})
+            return
+        if data.startswith("buyplan:"):
+            with app.app_context():
+                customer = customer_telegram_user(chat_id)
+                try:
+                    plan_id = int(data.split(":", 1)[1])
+                except ValueError:
+                    plan_id = 0
+                plan = db.session.get(Plan, plan_id)
+                if not customer:
+                    send_telegram_chat(chat_id, "⛔ Connect your Veyra account first.")
+                elif not plan or not plan.active or not plan.product.active:
+                    send_telegram_chat(chat_id, "❌ This plan is no longer available.")
+                else:
+                    o = create_telegram_order(customer, plan)
+                    number = re.sub(r"\D", "", os.getenv("WHATSAPP_NUMBER", "+14242165211"))
+                    wa_text = f"Hello, I want to complete Veyra order #{o.id}. Product: {plan.product.name} - {plan.name}. Username: {customer.username}."
+                    wa = f"https://wa.me/{number}?text={quote(wa_text)}" if number else None
+                    kb = {"inline_keyboard": [[{"text": "💬 Complete order on WhatsApp", "url": wa}],[{"text": "🛍 More products", "callback_data": "cust_products"}]]} if wa else {"inline_keyboard": [[{"text": "🛍 More products", "callback_data": "cust_products"}]]}
+                    price = plan.sale_price if plan.sale_price is not None else plan.price
+                    send_telegram_chat(chat_id, f"✅ Order #{o.id} created!\n\n📦 {plan.product.name} — {plan.name}\n💰 €{price:.2f}\n🟡 Status: Pending\n\nComplete your order through WhatsApp:", kb)
+            telegram_api("answerCallbackQuery", {"callback_query_id": cq.get("id"), "text": "Order created"})
+            return
+        if data == "cust_products":
+            with app.app_context():
                 products=Product.query.filter_by(active=True).order_by(Product.featured.desc(), Product.name).limit(30).all()
                 lines=["🛍 Veyra Products", ""]
                 for p in products:
@@ -739,7 +829,7 @@ def telegram_handle_update(update):
                 elif data == "cust_account":
                     send_telegram_chat(chat_id, f"👤 Veyra account\nUsername: @{customer.username}\nEmail: {customer.email}\nTelegram: {customer_telegram_label(customer)}")
                 else:
-                    number=os.getenv("WHATSAPP_NUMBER", "").strip()
+                    number=os.getenv("WHATSAPP_NUMBER", "+14242165211").strip()
                     send_telegram_chat(chat_id, f"💬 Veyra Support\n\nContact us on WhatsApp: https://wa.me/{re.sub(r'\D','',number)}" if number else "💬 Veyra Support\n\nPlease contact support through the Veyra website.")
             telegram_api("answerCallbackQuery", {"callback_query_id": cq.get("id")})
             return
@@ -856,7 +946,8 @@ def telegram_handle_update(update):
                             {"command":"support","description":"Contact support"}
                         ], "scope":{"type":"chat","chat_id":int(chat_id)}})
                         kb={"inline_keyboard":[[{"text":"🛍 Products","callback_data":"cust_products"}],[{"text":"🛒 My orders","callback_data":"cust_orders"},{"text":"🔐 Subscriptions","callback_data":"cust_subs"}],[{"text":"👤 My account","callback_data":"cust_account"},{"text":"💬 Support","callback_data":"cust_support"}]]}
-                        send_telegram_chat(chat_id, f"✅ Telegram connected to @{u.username}.\n\nWelcome to Veyra! Choose an option below:", kb)
+                        send_telegram_chat(chat_id, f"✅ Telegram connected to @{u.username}.\n\n🛍 Welcome to Veyra! Choose a product to continue:", kb)
+                        send_customer_products(chat_id)
                 return
             if telegram_authorized(uid):
                 kb={"inline_keyboard":[[{"text":"📋 Pending orders","callback_data":"admin_orders"}]]}
@@ -865,7 +956,9 @@ def telegram_handle_update(update):
                 customer=customer_telegram_user(chat_id)
                 if customer:
                     kb={"inline_keyboard":[[{"text":"🛍 Products","callback_data":"cust_products"}],[{"text":"🔥 Deals","callback_data":"cust_deals"}],[{"text":"🛒 My orders","callback_data":"cust_orders"},{"text":"🔐 Subscriptions","callback_data":"cust_subs"}],[{"text":"❤️ Wishlist","callback_data":"cust_wishlist"}],[{"text":"👤 My account","callback_data":"cust_account"},{"text":"💬 Support","callback_data":"cust_support"}]]}
-                    send_telegram_chat(chat_id, f"👋 Welcome to Veyra, @{customer.username}!\n\nWhat would you like to do?", kb)
+                    send_telegram_chat(chat_id, f"👋 Welcome back to Veyra, @{customer.username}!")
+                    send_customer_products(chat_id)
+                    send_telegram_chat(chat_id, "Use the menu below for your orders, subscriptions and account:", kb)
                 else:
                     send_telegram_chat(chat_id, "👋 Welcome to Veyra!\n\nConnect your Veyra account from the Account page to unlock your orders, subscriptions and deliveries.")
             return
@@ -894,7 +987,8 @@ def telegram_handle_update(update):
                         {"command":"account","description":"My account"},
                         {"command":"support","description":"Contact support"}
                     ], "scope":{"type":"chat","chat_id":int(chat_id)}})
-                    send_telegram_chat(chat_id, f"✅ Telegram connected to @{u.username}.\nYou can now receive deliveries and check your Veyra orders here.")
+                    send_telegram_chat(chat_id, f"✅ Telegram connected to @{u.username}.\n\n🛍 Welcome to Veyra! Your products are ready below:")
+                    send_customer_products(chat_id)
             return
         if command == "/orders" and not telegram_authorized(uid):
             with app.app_context():
@@ -972,7 +1066,7 @@ def telegram_handle_update(update):
                     send_telegram_chat(chat_id, f"👤 Veyra account\nUsername: @{customer.username}\nEmail: {customer.email}\nTelegram: {customer_telegram_label(customer)}")
             return
         if command == "/support" and not telegram_authorized(uid):
-            number=os.getenv("WHATSAPP_NUMBER", "").strip()
+            number=os.getenv("WHATSAPP_NUMBER", "+14242165211").strip()
             if number:
                 send_telegram_chat(chat_id, f"💬 Veyra Support\n\nContact us on WhatsApp: https://wa.me/{re.sub(r'\D','',number)}")
             else:
@@ -981,17 +1075,10 @@ def telegram_handle_update(update):
 
         if command == "/products" and not telegram_authorized(uid):
             with app.app_context():
-                products=Product.query.filter_by(active=True).order_by(Product.featured.desc(), Product.name).limit(30).all()
-                if not products:
-                    send_telegram_chat(chat_id, "📭 No products are available right now.")
+                if not customer_telegram_user(chat_id):
+                    send_telegram_chat(chat_id, "⛔ Connect your Veyra account first with /link CODE")
                 else:
-                    lines=["🛍 Veyra Products", ""]
-                    for p in products:
-                        plans=[x for x in p.plans if x.active]
-                        if plans:
-                            cheapest=min((x.sale_price if x.sale_price is not None else x.price) for x in plans)
-                            lines.append(f"• {p.name} — from €{cheapest:.2f}")
-                    send_telegram_chat(chat_id, "\n".join(lines))
+                    send_customer_products(chat_id)
             return
         if command == "/products" and telegram_authorized(uid):
             with app.app_context():
@@ -1080,14 +1167,24 @@ with app.app_context():
     except Exception as exc:
         app.logger.warning("Telegram command setup skipped: %s", exc)
 
-def notify_admins(message, event="new_order"):
+def notify_admins(message, event="new_order", order=None):
     app.logger.info("ADMIN NOTIFICATION [%s]: %s", event, message)
     row = AdminSetting.query.filter_by(key=f"notify_{event}").first() if has_app_context() else None
     enabled = True if not row or row.value == "" else row.value == "on"
     if not enabled:
         return
     if os.getenv("TELEGRAM_BOT_TOKEN"):
-        send_telegram(message)
+        kb = None
+        if event == "new_order" and order is not None:
+            number = re.sub(r"\D", "", os.getenv("WHATSAPP_NUMBER", "+14242165211"))
+            item = f"{order.plan.product.name} — {order.plan.name}" if order.plan else (order.bundle.name if order.bundle else "Order")
+            wa_text = f"Hello, I want to complete Veyra order #{order.id}. Product: {item}. Customer: @{order.user.username}."
+            wa = f"https://wa.me/{number}?text={quote(wa_text)}" if number else None
+            rows = [[{"text": "📦 Deliver", "callback_data": f"deliver:{order.id}"}]]
+            if wa:
+                rows.append([{"text": "💬 Open WhatsApp", "url": wa}])
+            kb = {"inline_keyboard": rows}
+        send_telegram(message, kb)
     # WhatsApp is intentionally optional; it requires Meta Cloud API credentials
     # and an approved template. Send only new-order notifications by default.
     if event == "new_order":
@@ -1241,7 +1338,7 @@ def order(plan_id):
         usage = CouponUsage.query.filter_by(coupon_id=coupon.id, user_id=current_user.id).first()
         if usage: usage.order_id = o.id
     audit("New order", f"Order #{o.id} — {plan.product.name} / {plan.name} — €{final_price:.2f}"); db.session.commit()
-    notify_admins(customer_order_notification(o))
+    notify_admins(customer_order_notification(o), "new_order", o)
     number = os.getenv("WHATSAPP_NUMBER","" )
     msg = f"Hello, I want to order {plan.product.name} - {plan.name}. Order #{o.id}. Username: {current_user.username}"
     wa = f"https://wa.me/{number}?text={quote(msg)}" if number else "#"
@@ -1342,7 +1439,7 @@ def bundle_order(bundle_id):
         usage = CouponUsage.query.filter_by(coupon_id=coupon.id, user_id=current_user.id).first()
         if usage: usage.order_id = o.id
     audit("New bundle order", f"Order #{o.id} — {bundle.name} — €{final_price:.2f}"); db.session.commit()
-    notify_admins(customer_order_notification(o))
+    notify_admins(customer_order_notification(o), "new_order", o)
     number = os.getenv("WHATSAPP_NUMBER","" )
     item_names = " + ".join(f"{i.plan.product.name} ({i.plan.name})" for i in bundle.items)
     msg = f"Hello, I want to order bundle: {bundle.name}. Items: {item_names}. Order #{o.id}. Username: {current_user.username}"
