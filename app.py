@@ -1,7 +1,5 @@
 import os
 import re
-import hashlib
-import base64
 from datetime import datetime, timedelta
 from urllib.parse import quote
 import json
@@ -16,6 +14,7 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
+from sqlalchemy import inspect
 
 load_dotenv()
 
@@ -79,6 +78,7 @@ class Product(db.Model):
     category_id = db.Column(db.Integer, db.ForeignKey("category.id"), nullable=False)
     active = db.Column(db.Boolean, default=True)
     featured = db.Column(db.Boolean, default=False)
+    price_label = db.Column(db.String(60), nullable=False, default="month")
     category = db.relationship("Category", backref="products")
     plans = db.relationship("Plan", backref="product", cascade="all, delete-orphan")
 
@@ -283,8 +283,15 @@ TRANSLATIONS["sq"].update({k:v for k,v in {
 "Digital marketplace":"Treg digjital","Digital access. Real possibilities.":"Qasje digjitale. Mundësi reale.","Premium digital products in one simple marketplace.":"Produkte digjitale premium në një treg të thjeshtë.","Digital products. Better value.":"Produkte digjitale. Vlerë më e mirë.","More possibilities.":"Më shumë mundësi.","Less spending.":"Më pak shpenzime.","Get the digital services you use every day at better prices, with simple ordering and real support.":"Merr shërbimet digjitale që përdor çdo ditë me çmime më të mira, porosi të thjeshtë dhe mbështetje reale.","Browse Products":"Shiko produktet","See Deals":"Shiko ofertat","Clear prices":"Çmime të qarta","Easy ordering":"Porosi e lehtë","Real support":"Mbështetje reale","All":"Të gjitha","Shop":"Dyqani","Popular products":"Produktet e njohura","Choose what you need. Keep it simple.":"Zgjidh çfarë të duhet. Mbaje të thjeshtë.","products":"produkte","product":"produkt","Search products...":"Kërko produkte...","month":"muaj","months":"muaj","Popular":"Popullore","from":"nga","View product":"Shiko produktin","No products match your search.":"Asnjë produkt nuk përputhet me kërkimin.","Save more":"Kursen më shumë","Bundle deals":"Oferta Bundle","Put several services together and pay one special price.":"Bashko disa shërbime dhe paguaj një çmim special.","Special price":"Çmim special","Get bundle":"Bli Bundle","Login to order":"Hyr për të porositur","Simple ordering":"Porosi e thjeshtë","No unnecessary steps.":"Pa hapa të panevojshëm.","Transparent pricing":"Çmime transparente","See the price before ordering.":"Shiko çmimin para porosisë.","One account":"Një llogari","Orders and subscriptions together.":"Porositë dhe abonimet në një vend.","We are here when you need us.":"Jemi këtu kur të duhemi.","A smarter way to buy":"Mënyrë më e zgjuar për të blerë","Why pay full price when you can pay less?":"Pse të paguash çmimin e plotë kur mund të paguash më pak?","Great digital services, better value. Simple, transparent and made for everyday use.":"Shërbime të mira digjitale, vlerë më e mirë. Të thjeshta, transparente dhe për përdorim të përditshëm.","Explore now":"Eksploro tani","Change theme":"Ndrysho temën","Help":"Ndihmë","Company":"Kompania","FAQ":"FAQ","Delivery":"Dorëzimi","About":"Rreth nesh","Privacy":"Privatësia","Terms":"Kushtet","All rights reserved.":"Të gjitha të drejtat e rezervuara.","Back to products":"Kthehu te produktet","Add / Remove Wishlist":"Shto / hiq nga dëshirat","Choose your plan":"Zgjidh planin","Full access for":"Qasje e plotë për","Coupon":"Kupon","Order":"Porosit","Customer reviews":"Vlerësimet e klientëve","Write a review...":"Shkruaj vlerësim...","Submit Review":"Dërgo vlerësimin","No approved reviews yet.":"Ende nuk ka vlerësime të aprovuara.","Welcome back":"Mirë se u ktheve","Sign in to manage your orders and subscriptions.":"Hyr për të menaxhuar porositë dhe abonimet.","No account yet?":"Nuk ke llogari?","Create your account":"Krijo llogarinë","Only username, email and password.":"Vetëm username, email dhe fjalëkalim.","Already have an account?":"Ke llogari?","Customer account":"Llogaria e klientit","Active subscriptions":"Abonimet aktive","Expires":"Skadon","Active":"Aktiv","No subscriptions yet.":"Ende nuk ka abonime.","Rewards":"Shpërblimet","Loyalty points":"Pikët e besnikërisë","My referral link":"Linku im i referimit","Referral points are earned only after your referred friend completes a purchase.":"Pikët e referimit fitohen vetëm pasi personi i referuar e përfundon blerjen.","Orders":"Porositë","No orders yet.":"Ende nuk ka porosi.","Order created":"Porosia u krijua","Your order is ready. Contact us on WhatsApp to complete it.":"Porosia jote është gati. Na kontakto në WhatsApp për ta përfunduar.","Go to account":"Shko te llogaria","Veyra Control":"Veyra Control","Manage everything from one place":"Menaxho gjithçka nga një vend","Dashboard":"Paneli","Bundles":"Bundles","Marketing":"Marketing","Settings":"Cilësimet","Activity":"Aktiviteti","View store":"Shiko dyqanin","Control center":"Qendra e kontrollit","Good control. Less work.":"Më shumë kontroll. Më pak punë.","Run products, prices, offers, orders and customers without touching code.":"Menaxho produktet, çmimet, ofertat, porositë dhe klientët pa prekur kodin.","Product":"Produkt","Bundle":"Bundle","Sales":"Shitjet","Cost":"Kosto","Profit":"Fitimi","non-cancelled orders":"porosi jo të anuluara","acquisition cost":"kosto e blerjes","sales minus cost":"shitje minus kosto","pending":"në pritje","registered":"të regjistruar","active":"aktive","Catalog":"Katalogu","Add products, images, plans, prices and visibility from here.":"Shto produkte, foto, plane, çmime dhe kontrollo dukshmërinë këtu.","Product name":"Emri i produktit","Category":"Kategoria","URL slug":"Slug i URL-së","Short description":"Përshkrim i shkurtër","Image URL":"URL e fotos","Replace image":"Zëvendëso foton","Months":"Muajt","Price":"Çmimi","Sale price":"Çmimi në zbritje","Your cost":"Kostoja jote","Visible":"I dukshëm","Featured":"I veçuar","Create product":"Krijo produkt","Name":"Emri","Description":"Përshkrimi","Slug":"Slug","Live":"Aktiv","Hidden":"Fshehur","plans":"plane","Plans & pricing":"Planet & çmimet","Public price · sale price · cost":"Çmimi publik · zbritja · kostoja","On":"Aktiv","Save":"Ruaj","Remove this plan?":"Ta heqim këtë plan?","New plan":"Plan i ri","Add plan":"Shto plan","Remove / Archive product":"Hiq / Arkivo produktin","Offers":"Ofertat","Build bundles, choose plans and set one special price.":"Krijo bundles, zgjidh planet dhe vendos një çmim special.","Bundle name":"Emri i Bundle","Bundle price":"Çmimi i Bundle","items":"artikuj","Save bundle":"Ruaj Bundle","Remove this bundle?":"Ta heqim këtë Bundle?","Remove":"Hiq","No bundles yet.":"Ende nuk ka Bundles.","Completed orders activate subscriptions and referral rewards.":"Porositë e përfunduara aktivizojnë abonimet dhe shpërblimet e referimit.","Customer":"Klienti","Sale":"Shitja","Status":"Statusi","No customers yet.":"Ende nuk ka klientë.","People":"Klientët","Trust":"Besimi","Reviews":"Vlerësimet","Approve":"Aprovo","Reject":"Refuzo","Approved":"Aprovuar","No reviews yet.":"Ende nuk ka vlerësime.","Create discounts without touching code.":"Krijo zbritje pa prekur kodin.","Code":"Kodi","Max uses":"Përdorime max.","Create coupon":"Krijo kupon","used":"përdorur","Disable":"Çaktivizo","Enable":"Aktivizo","Automation":"Automatizimi","Connect two admin Telegram IDs and receive order notifications.":"Lidh dy ID të adminëve në Telegram dhe merr njoftime për porositë.","Connected":"I lidhur","Not configured":"Nuk është konfiguruar","Admin 1 Telegram ID":"Telegram ID Admin 1","Admin 2 Telegram ID":"Telegram ID Admin 2","Save Telegram IDs":"Ruaj Telegram ID-të","Send test notification":"Dërgo njoftim testues","Bot commands":"Komandat e botit","Admin commands":"Komandat e adminit","Store":"Dyqani","Settings & appearance":"Cilësimet & pamja","Control the look, language and public contact details.":"Kontrollo pamjen, gjuhën dhe kontaktet publike.","Store name":"Emri i dyqanit","Support WhatsApp":"WhatsApp i supportit","Support email":"Email i supportit","Default language":"Gjuha fillestare","Hero title – English":"Titulli hero – Anglisht","Hero title – German":"Titulli hero – Gjermanisht","Hero title – French":"Titulli hero – Frëngjisht","Hero title – Albanian":"Titulli hero – Shqip","Announcement":"Njoftimi","Optional top announcement":"Njoftim opsional në krye","Store logo URL":"URL e logos së dyqanit","Default theme":"Tema fillestare","Maintenance mode":"Modalitet mirëmbajtjeje","Save settings":"Ruaj cilësimet","Available themes":"Temat në dispozicion","Security":"Siguria","Activity log":"Ditari i aktivitetit","See what admins changed.":"Shiko çfarë kanë ndryshuar adminët.","Clear activity log?":"Ta pastrojmë ditarin e aktivitetit?","Clear log":"Pastro ditarin","No activity yet.":"Ende nuk ka aktivitet."
 }.items()})
 
-for _l in ("de","fr","sq"):
-    TRANSLATIONS[_l].update({"Customer account": TRANSLATIONS[_l].get("Account","Account"),"Started":"Gestartet am" if _l=="de" else ("Commencé le" if _l=="fr" else "Filluar më"),"No approved reviews yet.":"Noch keine freigegebenen Bewertungen." if _l=="de" else ("Aucun avis approuvé pour le moment." if _l=="fr" else "Ende nuk ka vlerësime të aprovuara."),"Back to products":"Zurück zu den Produkten" if _l=="de" else ("Retour aux produits" if _l=="fr" else "Kthehu te produktet"),"Add / Remove Wishlist":"Zur Wunschliste hinzufügen / entfernen" if _l=="de" else ("Ajouter / retirer des favoris" if _l=="fr" else "Shto / hiq nga dëshirat"),"Full access for":"Voller Zugriff für" if _l=="de" else ("Accès complet pendant" if _l=="fr" else "Qasje e plotë për"),"Protected admin area":"Geschützter Admin-Bereich" if _l=="de" else ("Espace admin protégé" if _l=="fr" else "Zona e mbrojtur e adminit"),"Code":"Code" if _l in ("de","fr") else "Kodi","Discount":"Rabatt" if _l=="de" else ("Réduction" if _l=="fr" else "Zbritja"),"Uses":"Nutzungen" if _l=="de" else ("Utilisations" if _l=="fr" else "Përdorime"),"Expires":"Läuft ab" if _l=="de" else ("Expire" if _l=="fr" else "Skadon"),"Create account":"Konto erstellen" if _l=="de" else ("Créer un compte" if _l=="fr" else "Krijo llogari"),"Open WhatsApp":"WhatsApp öffnen" if _l=="de" else ("Ouvrir WhatsApp" if _l=="fr" else "Hap WhatsApp")})
+for _lang, _vals in {
+    "en": {"month":"month","year":"year","subscription":"subscription","one-time":"one-time","per month":"per month","per year":"per year"},
+    "de": {"month":"Monat","year":"Jahr","subscription":"Abonnement","one-time":"einmalig","per month":"pro Monat","per year":"pro Jahr"},
+    "fr": {"month":"mois","year":"an","subscription":"abonnement","one-time":"paiement unique","per month":"par mois","per year":"par an"},
+    "sq": {"month":"muaj","year":"vit","subscription":"abonim","one-time":"një herë","per month":"në muaj","per year":"në vit"},
+}.items():
+    TRANSLATIONS[_lang].update(_vals)
+
+TRANSLATIONS[_l].update({"Customer account": TRANSLATIONS[_l].get("Account","Account"),"Started":"Gestartet am" if _l=="de" else ("Commencé le" if _l=="fr" else "Filluar më"),"No approved reviews yet.":"Noch keine freigegebenen Bewertungen." if _l=="de" else ("Aucun avis approuvé pour le moment." if _l=="fr" else "Ende nuk ka vlerësime të aprovuara."),"Back to products":"Zurück zu den Produkten" if _l=="de" else ("Retour aux produits" if _l=="fr" else "Kthehu te produktet"),"Add / Remove Wishlist":"Zur Wunschliste hinzufügen / entfernen" if _l=="de" else ("Ajouter / retirer des favoris" if _l=="fr" else "Shto / hiq nga dëshirat"),"Full access for":"Voller Zugriff für" if _l=="de" else ("Accès complet pendant" if _l=="fr" else "Qasje e plotë për"),"Protected admin area":"Geschützter Admin-Bereich" if _l=="de" else ("Espace admin protégé" if _l=="fr" else "Zona e mbrojtur e adminit"),"Code":"Code" if _l in ("de","fr") else "Kodi","Discount":"Rabatt" if _l=="de" else ("Réduction" if _l=="fr" else "Zbritja"),"Uses":"Nutzungen" if _l=="de" else ("Utilisations" if _l=="fr" else "Përdorime"),"Expires":"Läuft ab" if _l=="de" else ("Expire" if _l=="fr" else "Skadon"),"Create account":"Konto erstellen" if _l=="de" else ("Créer un compte" if _l=="fr" else "Krijo llogari"),"Open WhatsApp":"WhatsApp öffnen" if _l=="de" else ("Ouvrir WhatsApp" if _l=="fr" else "Hap WhatsApp")})
 
 # Category labels are translated with the rest of the storefront.
 for _lang, _vals in {
@@ -554,18 +561,6 @@ def sync_telegram_profile(user, tg_user, chat_id=None):
     profile.last_name = tg_user.get("last_name") or None
     user.telegram_id = tid
 
-def public_order_ref(order):
-    """Stable non-sequential public reference for customers/admin notifications.
-    Internal DB order.id remains private and is still used for routes/callbacks.
-    """
-    oid = getattr(order, "id", order)
-    secret = os.getenv("SECRET_KEY", "veyra-public-order-ref")
-    digest = hashlib.sha256(f"{secret}:order:{oid}".encode("utf-8")).digest()
-    code = base64.b32encode(digest).decode("ascii").rstrip("=")[:10]
-    return f"VYR-{code}"
-
-app.jinja_env.globals["public_order_ref"] = public_order_ref
-
 def customer_telegram_label(user):
     if not user or not user.telegram_id:
         return "❌ Not connected"
@@ -576,7 +571,7 @@ def customer_telegram_label(user):
 
 def customer_order_notification(o):
     item = f"{o.plan.product.name} — {o.plan.name}" if o.plan else (o.bundle.name if o.bundle else "Order")
-    return (f"🛒 NEW VEYRA ORDER {public_order_ref(o)}\n\n"
+    return (f"🛒 NEW VEYRA ORDER #{o.id}\n\n"
             f"👤 Customer: @{o.user.username}\n"
             f"📧 Email: {o.user.email}\n"
             f"📱 Telegram: {customer_telegram_label(o.user)}\n\n"
@@ -709,7 +704,7 @@ def create_telegram_order(user, plan):
     o = Order(user_id=user.id, plan_id=plan.id, sale_price=selling_price, cost_price=cost, profit=selling_price-cost)
     db.session.add(o)
     db.session.flush()
-    audit_note = f"Order {public_order_ref(o)} created from Telegram for @{user.username} — {plan.product.name} / {plan.name}"
+    audit_note = f"Order #{o.id} created from Telegram for @{user.username} — {plan.product.name} / {plan.name}"
     app.logger.info(audit_note)
     db.session.commit()
     notify_admins(customer_order_notification(o), "new_order", o)
@@ -726,14 +721,14 @@ def customer_subscriptions_text(user_id):
 
 def customer_order_text(o):
     item=f"{o.plan.product.name} — {o.plan.name}" if o.plan else (o.bundle.name if o.bundle else "Order")
-    text=f"🧾 Order {public_order_ref(o)}\n📦 {item}\n💶 €{o.sale_price:.2f}\n📌 {o.status}"
+    text=f"🧾 Order #{o.id}\n📦 {item}\n💶 €{o.sale_price:.2f}\n📌 {o.status}"
     if o.delivery:
         text += f"\n\n📦 Delivery\n{o.delivery.content}"
     return text
 
 def telegram_order_text(o):
     item = f"{o.plan.product.name} — {o.plan.name}" if o.plan else o.bundle.name
-    return (f"🧾 Order {public_order_ref(o)}\n"
+    return (f"🧾 Order #{o.id}\n"
             f"👤 @{o.user.username}\n"
             f"📦 {item}\n"
             f"💶 €{o.sale_price:.2f}\n"
@@ -799,11 +794,11 @@ def telegram_handle_update(update):
                 else:
                     o = create_telegram_order(customer, plan)
                     number = re.sub(r"\D", "", os.getenv("WHATSAPP_NUMBER", "+14242165211"))
-                    wa_text = f"Hello, I want to complete my Veyra order {public_order_ref(o)}. Product: {plan.product.name} - {plan.name}. Username: {customer.username}."
+                    wa_text = f"Hello, I want to complete Veyra order #{o.id}. Product: {plan.product.name} - {plan.name}. Username: {customer.username}."
                     wa = f"https://wa.me/{number}?text={quote(wa_text)}" if number else None
                     kb = {"inline_keyboard": [[{"text": "💬 Complete order on WhatsApp", "url": wa}],[{"text": "🛍 More products", "callback_data": "cust_products"}]]} if wa else {"inline_keyboard": [[{"text": "🛍 More products", "callback_data": "cust_products"}]]}
                     price = plan.sale_price if plan.sale_price is not None else plan.price
-                    send_telegram_chat(chat_id, f"✅ Order {public_order_ref(o)} created!\n\n📦 {plan.product.name} — {plan.name}\n💰 €{price:.2f}\n🟡 Status: Pending\n\nComplete your order through WhatsApp:", kb)
+                    send_telegram_chat(chat_id, f"✅ Order #{o.id} created!\n\n📦 {plan.product.name} — {plan.name}\n💰 €{price:.2f}\n🟡 Status: Pending\n\nComplete your order through WhatsApp:", kb)
             telegram_api("answerCallbackQuery", {"callback_query_id": cq.get("id"), "text": "Order created"})
             return
         if data == "cust_products":
@@ -906,10 +901,10 @@ def telegram_handle_update(update):
                                 sent = send_telegram_chat(o.user.telegram_id, f"✅ Veyra delivery for order #{o.id}\n\n{draft['content']}\n\nYour order is now completed.")
                                 d.sent_to_customer_telegram = sent
                                 db.session.commit()
-                            audit_note = f"Order {public_order_ref(o)} delivered via Telegram by {uid}; previous status {previous}"
+                            audit_note = f"Order #{o.id} delivered via Telegram by {uid}; previous status {previous}"
                             app.logger.info(audit_note)
-                            send_telegram_chat(chat_id, f"✅ Delivered and confirmed on website.\nOrder {public_order_ref(o)} is now COMPLETED." + ("\n📨 Sent to customer's Telegram." if sent else "\nℹ️ Customer Telegram is not linked, so delivery is stored on the website only."))
-                            notify_admins(f"📦 Delivery confirmed from Telegram\nOrder {public_order_ref(o)}\n@{o.user.username}\n€{o.sale_price:.2f}")
+                            send_telegram_chat(chat_id, f"✅ Delivered and confirmed on website.\nOrder #{o.id} is now COMPLETED." + ("\n📨 Sent to customer's Telegram." if sent else "\nℹ️ Customer Telegram is not linked, so delivery is stored on the website only."))
+                            notify_admins(f"📦 Delivery confirmed from Telegram\nOrder #{o.id}\n@{o.user.username}\n€{o.sale_price:.2f}")
                 TELEGRAM_DELIVERY_DRAFTS.pop(uid, None)
         elif data == "delivery_cancel":
             TELEGRAM_DELIVERY_DRAFTS.pop(uid, None)
@@ -1177,6 +1172,11 @@ def start_telegram_bot():
 with app.app_context():
     try:
         db.create_all()
+        # Lightweight compatibility migration for existing Railway databases.
+        cols = {c["name"] for c in inspect(db.engine).get_columns("product")}
+        if "price_label" not in cols:
+            db.session.execute(db.text("ALTER TABLE product ADD COLUMN price_label VARCHAR(60) DEFAULT 'month'"))
+            db.session.commit()
         configure_telegram_commands()
     except Exception as exc:
         app.logger.warning("Telegram command setup skipped: %s", exc)
@@ -1192,7 +1192,7 @@ def notify_admins(message, event="new_order", order=None):
         if event == "new_order" and order is not None:
             number = re.sub(r"\D", "", os.getenv("WHATSAPP_NUMBER", "+14242165211"))
             item = f"{order.plan.product.name} — {order.plan.name}" if order.plan else (order.bundle.name if order.bundle else "Order")
-            wa_text = f"Hello, I want to complete my Veyra order {public_order_ref(order)}. Product: {item}. Customer: @{order.user.username}."
+            wa_text = f"Hello, I want to complete Veyra order #{order.id}. Product: {item}. Customer: @{order.user.username}."
             wa = f"https://wa.me/{number}?text={quote(wa_text)}" if number else None
             rows = [[{"text": "📦 Deliver", "callback_data": f"deliver:{order.id}"}]]
             if wa:
@@ -1351,11 +1351,10 @@ def order(plan_id):
     if coupon:
         usage = CouponUsage.query.filter_by(coupon_id=coupon.id, user_id=current_user.id).first()
         if usage: usage.order_id = o.id
-    audit("New order", f"Order {public_order_ref(o)} — {plan.product.name} / {plan.name} — €{final_price:.2f}"); db.session.commit()
+    audit("New order", f"Order #{o.id} — {plan.product.name} / {plan.name} — €{final_price:.2f}"); db.session.commit()
     notify_admins(customer_order_notification(o), "new_order", o)
-    support_row = AdminSetting.query.filter_by(key="support_whatsapp").first()
-    number = re.sub(r"\D", "", (support_row.value if support_row and support_row.value else os.getenv("WHATSAPP_NUMBER", "+14242165211")))
-    msg = f"Hello, I want to order {plan.product.name} - {plan.name}. Reference: {public_order_ref(o)}. Username: {current_user.username}"
+    number = os.getenv("WHATSAPP_NUMBER","" )
+    msg = f"Hello, I want to order {plan.product.name} - {plan.name}. Order #{o.id}. Username: {current_user.username}"
     wa = f"https://wa.me/{number}?text={quote(msg)}" if number else "#"
     return render_template("order.html", order=o, wa=wa)
 
@@ -1387,7 +1386,7 @@ def start_payment(order_id):
             app.logger.warning("Stripe checkout error: %s", data)
             flash("Unable to start Stripe checkout.")
             return redirect(url_for("order_payment_unavailable", order_id=o.id))
-        audit("Stripe checkout started", f"Order {public_order_ref(o)}")
+        audit("Stripe checkout started", f"Order #{o.id}")
         db.session.commit()
         return redirect(data["url"])
     except Exception as exc:
@@ -1415,8 +1414,8 @@ def payment_success():
     o=db.session.get(Order,oid)
     if not o or o.user_id != current_user.id: return ("Payment order not found",404)
     if data.get("payment_status") == "paid":
-        o.status="processing"; audit("Payment verified",f"Order {public_order_ref(o)} paid via Stripe"); db.session.commit()
-        notify_admins(f"💳 Payment confirmed for order {public_order_ref(o)}\n@{o.user.username}\n€{o.sale_price:.2f}", "payment")
+        o.status="processing"; audit("Payment verified",f"Order #{o.id} paid via Stripe"); db.session.commit()
+        notify_admins(f"💳 Payment confirmed for order #{o.id}\n@{o.user.username}\n€{o.sale_price:.2f}", "payment")
         flash("Payment confirmed. Your order is now being processed.")
     return redirect(url_for("account"))
 
@@ -1453,12 +1452,11 @@ def bundle_order(bundle_id):
     if coupon:
         usage = CouponUsage.query.filter_by(coupon_id=coupon.id, user_id=current_user.id).first()
         if usage: usage.order_id = o.id
-    audit("New bundle order", f"Order {public_order_ref(o)} — {bundle.name} — €{final_price:.2f}"); db.session.commit()
+    audit("New bundle order", f"Order #{o.id} — {bundle.name} — €{final_price:.2f}"); db.session.commit()
     notify_admins(customer_order_notification(o), "new_order", o)
-    support_row = AdminSetting.query.filter_by(key="support_whatsapp").first()
-    number = re.sub(r"\D", "", (support_row.value if support_row and support_row.value else os.getenv("WHATSAPP_NUMBER", "+14242165211")))
+    number = os.getenv("WHATSAPP_NUMBER","" )
     item_names = " + ".join(f"{i.plan.product.name} ({i.plan.name})" for i in bundle.items)
-    msg = f"Hello, I want to order bundle: {bundle.name}. Items: {item_names}. Reference: {public_order_ref(o)}. Username: {current_user.username}"
+    msg = f"Hello, I want to order bundle: {bundle.name}. Items: {item_names}. Order #{o.id}. Username: {current_user.username}"
     wa = f"https://wa.me/{number}?text={quote(msg)}" if number else "#"
     return render_template("order.html", order=o, wa=wa)
 
@@ -1649,7 +1647,7 @@ def admin_order_deliver(order_id):
         db.session.add(OrderDelivery(order_id=o.id, content=content, delivered_by_telegram_id=None, sent_to_customer_telegram=False))
     previous=o.status
     complete_order_record(o, source=f"web:{current_user.username}")
-    audit("Order delivered", f"Order {public_order_ref(o)}: {previous} → completed")
+    audit("Order delivered", f"Order #{o.id}: {previous} → completed")
     db.session.commit()
     flash("Delivery saved and order completed.")
     if o.user.telegram_id:
@@ -1698,10 +1696,10 @@ def order_status(order_id,status):
         complete_order_record(o, source="admin")
     else:
         o.status = status
-    audit("Order status", f"Order {public_order_ref(o)}: {previous} → {status}")
+    audit("Order status", f"Order #{o.id}: {previous} → {status}")
     db.session.commit()
     if status == "completed" and previous != "completed":
-        notify_admins(f"✅ Order {public_order_ref(o)} completed\n@{o.user.username}\n€{o.sale_price:.2f}\nProfit: €{o.profit:.2f}")
+        notify_admins(f"✅ Order #{o.id} completed\n@{o.user.username}\n€{o.sale_price:.2f}\nProfit: €{o.profit:.2f}")
     return redirect(url_for("admin"))
 
 
@@ -1864,6 +1862,7 @@ def admin_product_new():
     uploaded_image = save_product_image(request.files.get("image_file"))
     p = Product(name=name, slug=unique_slug(request.form.get("slug") or name),
                 description=request.form.get("description", "").strip(),
+                price_label=(request.form.get("price_label_custom", "").strip() if request.form.get("price_label_type") == "custom" else request.form.get("price_label_type", "month").strip()) or "month",
                 image_url=uploaded_image or request.form.get("image_url", "").strip(),
                 category_id=category.id,
                 active=request.form.get("active") == "on",
@@ -1896,6 +1895,7 @@ def admin_product_edit(product_id):
     p.name = name
     p.slug = unique_slug(request.form.get("slug") or name, Product, p.id)
     p.description = request.form.get("description", "").strip()
+    p.price_label = (request.form.get("price_label_custom", "").strip() if request.form.get("price_label_type") == "custom" else request.form.get("price_label_type", p.price_label or "month").strip()) or "month"
     uploaded_image = save_product_image(request.files.get("image_file"))
     p.image_url = uploaded_image or request.form.get("image_url", "").strip()
     p.category_id = category.id
@@ -1904,6 +1904,77 @@ def admin_product_edit(product_id):
     db.session.commit()
     flash(f"Product '{p.name}' updated.")
     return redirect(url_for("admin"))
+
+@app.route("/admin/products/bulk-price", methods=["POST"])
+@login_required
+def admin_products_bulk_price():
+    if not admin_required(): return ("Forbidden",403)
+    product_ids = []
+    for raw in request.form.getlist("product_ids"):
+        try:
+            product_ids.append(int(raw))
+        except (TypeError, ValueError):
+            continue
+    product_ids = list(dict.fromkeys(product_ids))
+    if not product_ids:
+        flash("Select at least one product.")
+        return redirect(url_for("admin") + "#products")
+
+    plan_months_raw = request.form.get("plan_months", "all").strip().lower()
+    try:
+        public_price = float(request.form.get("price", ""))
+    except (TypeError, ValueError):
+        flash("Enter a valid public price.")
+        return redirect(url_for("admin") + "#products")
+    if public_price < 0:
+        flash("Price cannot be negative.")
+        return redirect(url_for("admin") + "#products")
+
+    sale_raw = request.form.get("sale_price", "").strip()
+    cost_raw = request.form.get("cost_price", "").strip()
+    try:
+        sale_price = float(sale_raw) if sale_raw else None
+        cost_price = float(cost_raw) if cost_raw else None
+    except ValueError:
+        flash("Sale price and cost must be valid numbers.")
+        return redirect(url_for("admin") + "#products")
+    if sale_price is not None and sale_price < 0 or cost_price is not None and cost_price < 0:
+        flash("Sale price and cost cannot be negative.")
+        return redirect(url_for("admin") + "#products")
+
+    selected = Product.query.filter(Product.id.in_(product_ids)).all()
+    selected_by_id = {p.id: p for p in selected}
+    changed = 0
+    products_changed = []
+    for pid in product_ids:
+        p = selected_by_id.get(pid)
+        if not p:
+            continue
+        plans = list(p.plans)
+        if plan_months_raw != "all":
+            try:
+                target_months = int(plan_months_raw)
+            except ValueError:
+                continue
+            plans = [plan for plan in plans if plan.months == target_months]
+        for plan in plans:
+            plan.price = public_price
+            if sale_price is not None:
+                plan.sale_price = sale_price
+            if cost_price is not None:
+                plan.cost_price = cost_price
+            changed += 1
+        if plans:
+            products_changed.append(p.name)
+
+    if changed:
+        target = "all plans" if plan_months_raw == "all" else f"{plan_months_raw} month plan"
+        audit("Bulk pricing update", f"{', '.join(products_changed)} → {target}: €{public_price:.2f}" + (f", sale €{sale_price:.2f}" if sale_price is not None else "") + (f", cost €{cost_price:.2f}" if cost_price is not None else ""))
+        db.session.commit()
+        flash(f"Updated {changed} plan(s) across {len(products_changed)} product(s).")
+    else:
+        flash("No matching plans found for the selected products.")
+    return redirect(url_for("admin") + "#products")
 
 @app.route("/admin/product/<int:product_id>/delete", methods=["POST"])
 @login_required
@@ -2000,6 +2071,7 @@ def admin_product_duplicate(product_id):
     source = db.session.get(Product, product_id)
     if not source: return ("Not found", 404)
     copy = Product(name=f"{source.name} Copy", slug=unique_slug(f"{source.name}-copy"),
+                    price_label=source.price_label or "month",
                    description=source.description, image_url=source.image_url,
                    category_id=source.category_id, active=False, featured=False)
     db.session.add(copy); db.session.flush()
