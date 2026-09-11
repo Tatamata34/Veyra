@@ -75,6 +75,10 @@
           <label>Short description<input name="description" placeholder="Premium digital subscription"></label>
           <label>Logo / image URL<input name="image_url" placeholder="https://..."></label>
           <label>Upload logo<input type="file" name="image_file" accept="image/png,image/jpeg,image/webp,image/svg+xml"></label>
+          <label>Price display<select name="price_label_type" onchange="this.nextElementSibling.hidden=this.value!=='custom'">
+            <option value="month">month</option><option value="year">year</option><option value="subscription">subscription</option><option value="one-time">one-time</option><option value="custom">Custom</option>
+          </select></label>
+          <label class="price-label-custom" hidden>Custom label<input name="price_label_custom" placeholder="e.g. / lifetime"></label>
           <label>Months<input name="months" type="number" min="1" value="1"></label>
           <label>Public price (€)<input name="price" type="number" min="0" step="0.01" value="0"></label>
           <label>Sale price (€)<input name="sale_price" type="number" min="0" step="0.01" placeholder="Optional"></label>
@@ -82,6 +86,34 @@
           <label class="check-line"><input type="checkbox" name="active" checked> Visible in shop</label>
           <label class="check-line"><input type="checkbox" name="featured"> Featured product</label>
           <div class="form-submit"><button class="nav-cta">＋ {{tr('Create product')}}</button></div>
+        </form>
+      </details>
+
+      <details class="bulk-price-box" open>
+        <summary><span>⚡</span><div><b>Bulk pricing</b><small>Select multiple products and change the same price at once</small></div><em>⌄</em></summary>
+        <form method="post" action="/admin/products/bulk-price" class="bulk-price-form" onsubmit="return confirmBulkPrice()">
+          <div class="bulk-product-picker">
+            <div class="bulk-picker-head"><b>Select products</b><button type="button" class="mini" onclick="toggleBulkProducts(true)">Select all</button><button type="button" class="mini" onclick="toggleBulkProducts(false)">Clear</button><span id="bulkSelectedCount">0 selected</span></div>
+            <div class="bulk-product-grid">
+              {% for p in products %}
+              <label><input class="bulk-product-check" type="checkbox" name="product_ids" value="{{p.id}}" onchange="updateBulkCount()"><span>{% if product_logo(p) %}<img src="{{product_logo(p)}}" alt="">{% endif %}<b>{{p.name}}</b><small>{{p.plans|length}} plans</small></span></label>
+              {% endfor %}
+            </div>
+          </div>
+          <div class="bulk-price-fields">
+            <label>Plan duration
+              <select name="plan_months">
+                <option value="all">All plans of selected products</option>
+                {% set bulk_months=[] %}
+                {% for plan in plans %}{% if plan.months not in bulk_months %}{% set _=bulk_months.append(plan.months) %}{% endif %}{% endfor %}
+                {% for m in bulk_months|sort %}<option value="{{m}}">{{m}} month{% if m != 1 %}s{% endif %} only</option>{% endfor %}
+              </select>
+            </label>
+            <label>Public price (€)<input name="price" type="number" min="0" step="0.01" placeholder="e.g. 9.99" required></label>
+            <label>Sale price (€) <small>optional</small><input name="sale_price" type="number" min="0" step="0.01" placeholder="Keep existing"></label>
+            <label>Cost (€) <small>optional</small><input name="cost_price" type="number" min="0" step="0.01" placeholder="Keep existing"></label>
+            <div class="bulk-price-actions"><span>Only selected products are changed. Blank sale/cost fields keep their current values.</span><button class="nav-cta">⚡ Apply price to selected</button></div>
+          </div>
         </form>
       </details>
 
@@ -106,6 +138,15 @@
               <label>Description<input name="description" value="{{p.description}}"></label>
               <label>Logo / image URL<input name="image_url" value="{{p.image_url}}"></label>
               <label>Replace logo<input type="file" name="image_file" accept="image/png,image/jpeg,image/webp,image/svg+xml"></label>
+              <label>Price display<select name="price_label_type" onchange="this.nextElementSibling.hidden=this.value!=='custom'">
+                {% set lbl=p.price_label or 'month' %}
+                <option value="month" {% if lbl=='month' %}selected{% endif %}>month</option>
+                <option value="year" {% if lbl=='year' %}selected{% endif %}>year</option>
+                <option value="subscription" {% if lbl=='subscription' %}selected{% endif %}>subscription</option>
+                <option value="one-time" {% if lbl=='one-time' %}selected{% endif %}>one-time</option>
+                <option value="custom" {% if lbl not in ['month','year','subscription','one-time'] %}selected{% endif %}>Custom</option>
+              </select></label>
+              <label class="price-label-custom" {% if lbl in ['month','year','subscription','one-time'] %}hidden{% endif %}>Custom label<input name="price_label_custom" value="{% if lbl not in ['month','year','subscription','one-time'] %}{{lbl}}{% endif %}" placeholder="e.g. lifetime"></label>
               <label class="check-line"><input type="checkbox" name="active" {% if p.active %}checked{% endif %}> Visible</label>
               <label class="check-line"><input type="checkbox" name="featured" {% if p.featured %}checked{% endif %}> Featured</label>
               <div class="form-submit"><button class="soft-btn">{{tr('Save product')}}</button></div>
@@ -204,3 +245,10 @@ const adminSections=[...document.querySelectorAll('.admin-anchor')];
 const markAdmin=()=>{let best='dashboard';for(const s of adminSections){if(s.getBoundingClientRect().top<180)best=s.id}adminLinks.forEach(a=>a.classList.toggle('active',a.getAttribute('href')==='#'+best))};window.addEventListener('scroll',markAdmin,{passive:true});markAdmin();
 </script>
 {% endblock %}
+
+<script>
+function updateBulkCount(){const n=document.querySelectorAll('.bulk-product-check:checked').length;const el=document.getElementById('bulkSelectedCount');if(el)el.textContent=n+' selected';}
+function toggleBulkProducts(on){document.querySelectorAll('.bulk-product-check').forEach(x=>x.checked=on);updateBulkCount();}
+function confirmBulkPrice(){const n=document.querySelectorAll('.bulk-product-check:checked').length;if(!n){alert('Select at least one product.');return false;}return confirm('Apply this price to '+n+' selected product(s)?');}
+updateBulkCount();
+</script>
