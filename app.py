@@ -1339,7 +1339,8 @@ def order(plan_id):
         if usage: usage.order_id = o.id
     audit("New order", f"Order #{o.id} — {plan.product.name} / {plan.name} — €{final_price:.2f}"); db.session.commit()
     notify_admins(customer_order_notification(o), "new_order", o)
-    number = os.getenv("WHATSAPP_NUMBER","" )
+    support_row = AdminSetting.query.filter_by(key="support_whatsapp").first()
+    number = re.sub(r"\D", "", (support_row.value if support_row and support_row.value else os.getenv("WHATSAPP_NUMBER", "+14242165211")))
     msg = f"Hello, I want to order {plan.product.name} - {plan.name}. Order #{o.id}. Username: {current_user.username}"
     wa = f"https://wa.me/{number}?text={quote(msg)}" if number else "#"
     return render_template("order.html", order=o, wa=wa)
@@ -1440,7 +1441,8 @@ def bundle_order(bundle_id):
         if usage: usage.order_id = o.id
     audit("New bundle order", f"Order #{o.id} — {bundle.name} — €{final_price:.2f}"); db.session.commit()
     notify_admins(customer_order_notification(o), "new_order", o)
-    number = os.getenv("WHATSAPP_NUMBER","" )
+    support_row = AdminSetting.query.filter_by(key="support_whatsapp").first()
+    number = re.sub(r"\D", "", (support_row.value if support_row and support_row.value else os.getenv("WHATSAPP_NUMBER", "+14242165211")))
     item_names = " + ".join(f"{i.plan.product.name} ({i.plan.name})" for i in bundle.items)
     msg = f"Hello, I want to order bundle: {bundle.name}. Items: {item_names}. Order #{o.id}. Username: {current_user.username}"
     wa = f"https://wa.me/{number}?text={quote(msg)}" if number else "#"
