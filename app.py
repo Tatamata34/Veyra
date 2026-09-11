@@ -702,6 +702,47 @@ def telegram_handle_update(update):
                     send_telegram_chat(chat_id, customer_order_text(o))
             telegram_api("answerCallbackQuery", {"callback_query_id": cq.get("id")})
             return
+        if data == "cust_products":
+            with app.app_context():
+                products=Product.query.filter_by(active=True).order_by(Product.featured.desc(), Product.name).limit(30).all()
+                lines=["🛍 Veyra Products", ""]
+                for p in products:
+                    plans=[x for x in p.plans if x.active]
+                    if plans:
+                        cheapest=min((x.sale_price if x.sale_price is not None else x.price) for x in plans)
+                        lines.append(f"• {p.name} — from €{cheapest:.2f}")
+                send_telegram_chat(chat_id, "\n".join(lines) if len(lines)>2 else "📭 No products are available right now.")
+            telegram_api("answerCallbackQuery", {"callback_query_id": cq.get("id")})
+            return
+        if data == "cust_deals":
+            with app.app_context():
+                deals=Product.query.join(Plan).filter(Product.active==True, Plan.active==True, Plan.sale_price.isnot(None)).order_by(Product.name).all()
+                lines=["🔥 Veyra Deals", ""]
+                seen=set()
+                for p in deals:
+                    if p.id in seen: continue
+                    seen.add(p.id)
+                    plans=[x for x in p.plans if x.active and x.sale_price is not None]
+                    if plans:
+                        lines.append(f"• {p.name} — from €{min(x.sale_price for x in plans):.2f}")
+                send_telegram_chat(chat_id, "\n".join(lines) if len(lines)>2 else "📭 No active deals.")
+            telegram_api("answerCallbackQuery", {"callback_query_id": cq.get("id")})
+            return
+        if data in {"cust_wishlist","cust_account","cust_support"}:
+            with app.app_context():
+                customer=customer_telegram_user(chat_id)
+                if not customer:
+                    send_telegram_chat(chat_id, "⛔ Connect your Veyra account first.")
+                elif data == "cust_wishlist":
+                    items=Wishlist.query.filter_by(user_id=customer.id).all()
+                    send_telegram_chat(chat_id, "❤️ Your wishlist\n\n" + "\n".join(f"• {x.product.name}" for x in items) if items else "❤️ Your wishlist is empty.")
+                elif data == "cust_account":
+                    send_telegram_chat(chat_id, f"👤 Veyra account\nUsername: @{customer.username}\nEmail: {customer.email}\nTelegram: {customer_telegram_label(customer)}")
+                else:
+                    number=os.getenv("WHATSAPP_NUMBER", "").strip()
+                    send_telegram_chat(chat_id, f"💬 Veyra Support\n\nContact us on WhatsApp: https://wa.me/{re.sub(r'\D','',number)}" if number else "💬 Veyra Support\n\nPlease contact support through the Veyra website.")
+            telegram_api("answerCallbackQuery", {"callback_query_id": cq.get("id")})
+            return
         if not telegram_authorized(uid):
             telegram_api("answerCallbackQuery", {"callback_query_id": cq.get("id"), "text": "Not authorized.", "show_alert": True})
             return
@@ -789,15 +830,44 @@ def telegram_handle_update(update):
         command = text.split()[0].split("@",1)[0].lower()
         args = text.split()[1:]
         if command in {"/start", "/help"}:
+            # Telegram deep-link: https://t.me/veyra2026_bot?start=link_TOKEN
+            # This lets the Account page open Telegram directly and connect the account.
+            if args and args[0].startswith("link_"):
+                token = args[0][5:].strip()
+                with app.app_context():
+                    link=TelegramLink.query.filter_by(token=token, used=False).first()
+                    if not link or link.expires_at < datetime.utcnow():
+                        send_telegram_chat(chat_id, "❌ This Telegram link is invalid or has expired. Generate a new link from your Veyra account.")
+                    elif User.query.filter(User.telegram_id==str(chat_id), User.id!=link.user_id).first():
+                        send_telegram_chat(chat_id, "❌ This Telegram account is already linked to another Veyra account.")
+                    else:
+                        u=db.session.get(User, link.user_id)
+                        u.telegram_id=str(chat_id); link.used=True
+                        sync_telegram_profile(u, tg_user, chat_id)
+                        db.session.commit()
+                        telegram_api("setMyCommands", {"commands": [
+                            {"command":"start","description":"Open Veyra"},
+                            {"command":"products","description":"Browse products"},
+                            {"command":"deals","description":"View deals"},
+                            {"command":"orders","description":"My orders"},
+                            {"command":"subscriptions","description":"My subscriptions"},
+                            {"command":"wishlist","description":"My wishlist"},
+                            {"command":"account","description":"My account"},
+                            {"command":"support","description":"Contact support"}
+                        ], "scope":{"type":"chat","chat_id":int(chat_id)}})
+                        kb={"inline_keyboard":[[{"text":"🛍 Products","callback_data":"cust_products"}],[{"text":"🛒 My orders","callback_data":"cust_orders"},{"text":"🔐 Subscriptions","callback_data":"cust_subs"}],[{"text":"👤 My account","callback_data":"cust_account"},{"text":"💬 Support","callback_data":"cust_support"}]]}
+                        send_telegram_chat(chat_id, f"✅ Telegram connected to @{u.username}.\n\nWelcome to Veyra! Choose an option below:", kb)
+                return
             if telegram_authorized(uid):
-                send_telegram_chat(chat_id, "🤖 Veyra Admin Bot\n\n/orders — pending orders\n/products — active products\n/customers — customer count\n/subscriptions — active subscriptions\n/settelegram username telegram_id — manual customer link\n/stats — store stats\n/cancel — cancel current delivery draft")
+                kb={"inline_keyboard":[[{"text":"📋 Pending orders","callback_data":"admin_orders"}]]}
+                send_telegram_chat(chat_id, "🤖 Veyra Admin\n\nUse the commands below or choose an action:", kb)
             else:
                 customer=customer_telegram_user(chat_id)
                 if customer:
-                    kb={"inline_keyboard":[[{"text":"🛒 My orders","callback_data":"cust_orders"}],[{"text":"🔐 My subscriptions","callback_data":"cust_subs"}]]}
-                    send_telegram_chat(chat_id, f"👋 Welcome to Veyra, @{customer.username}.", kb)
+                    kb={"inline_keyboard":[[{"text":"🛍 Products","callback_data":"cust_products"}],[{"text":"🔥 Deals","callback_data":"cust_deals"}],[{"text":"🛒 My orders","callback_data":"cust_orders"},{"text":"🔐 Subscriptions","callback_data":"cust_subs"}],[{"text":"❤️ Wishlist","callback_data":"cust_wishlist"}],[{"text":"👤 My account","callback_data":"cust_account"},{"text":"💬 Support","callback_data":"cust_support"}]]}
+                    send_telegram_chat(chat_id, f"👋 Welcome to Veyra, @{customer.username}!\n\nWhat would you like to do?", kb)
                 else:
-                    send_telegram_chat(chat_id, "👋 Veyra bot is online.\n\nTo connect your Veyra account, generate a Telegram link code from your Account page and send: /link CODE")
+                    send_telegram_chat(chat_id, "👋 Welcome to Veyra!\n\nConnect your Veyra account from the Account page to unlock your orders, subscriptions and deliveries.")
             return
         if command == "/link":
             if not args:
@@ -909,6 +979,20 @@ def telegram_handle_update(update):
                 send_telegram_chat(chat_id, "💬 Veyra Support\n\nPlease contact support through the Veyra website.")
             return
 
+        if command == "/products" and not telegram_authorized(uid):
+            with app.app_context():
+                products=Product.query.filter_by(active=True).order_by(Product.featured.desc(), Product.name).limit(30).all()
+                if not products:
+                    send_telegram_chat(chat_id, "📭 No products are available right now.")
+                else:
+                    lines=["🛍 Veyra Products", ""]
+                    for p in products:
+                        plans=[x for x in p.plans if x.active]
+                        if plans:
+                            cheapest=min((x.sale_price if x.sale_price is not None else x.price) for x in plans)
+                            lines.append(f"• {p.name} — from €{cheapest:.2f}")
+                    send_telegram_chat(chat_id, "\n".join(lines))
+            return
         if command == "/products" and telegram_authorized(uid):
             with app.app_context():
                 products=Product.query.filter_by(active=True).order_by(Product.name).limit(30).all()
@@ -1094,7 +1178,9 @@ def account_telegram_link():
     token=secrets.token_urlsafe(10)
     db.session.add(TelegramLink(user_id=current_user.id, token=token, expires_at=datetime.utcnow()+timedelta(minutes=15)))
     db.session.commit()
-    flash(f"Telegram code: {token} — send /link {token} to the Veyra bot within 15 minutes.")
+    bot_username=os.getenv("TELEGRAM_BOT_USERNAME", "veyra2026_bot").lstrip("@").strip()
+    telegram_url=f"https://t.me/{bot_username}?start=link_{token}"
+    flash(f"Telegram link ready: {telegram_url} — or send /link {token} to @{bot_username} within 15 minutes.")
     return redirect(url_for("account"))
 
 @app.route("/account")
@@ -1108,7 +1194,14 @@ def account():
     my_ref = Referral.query.filter_by(referrer_id=current_user.id, referred_id=None).first()
     if not my_ref:
         my_ref = Referral.query.filter_by(referrer_id=current_user.id).order_by(Referral.id.desc()).first()
-    return render_template("account.html", orders=orders, subs=subs, points=points, referral=my_ref, point_history=point_history, wishlist_items=wishlist_items)
+    telegram_link = TelegramLink.query.filter_by(user_id=current_user.id, used=False).order_by(TelegramLink.id.desc()).first()
+    telegram_url = None
+    if telegram_link and telegram_link.expires_at >= datetime.utcnow():
+        bot_username=os.getenv("TELEGRAM_BOT_USERNAME", "veyra2026_bot").lstrip("@").strip()
+        telegram_url=f"https://t.me/{bot_username}?start=link_{telegram_link.token}"
+    else:
+        telegram_link = None
+    return render_template("account.html", orders=orders, subs=subs, points=points, referral=my_ref, point_history=point_history, wishlist_items=wishlist_items, telegram_link=telegram_link, telegram_url=telegram_url)
 
 @app.route("/product/<slug>")
 def product(slug):
