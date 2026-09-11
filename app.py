@@ -1,5 +1,7 @@
 import os
 import re
+import hashlib
+import base64
 from datetime import datetime, timedelta
 from urllib.parse import quote
 import json
@@ -552,6 +554,18 @@ def sync_telegram_profile(user, tg_user, chat_id=None):
     profile.last_name = tg_user.get("last_name") or None
     user.telegram_id = tid
 
+def public_order_ref(order):
+    """Stable non-sequential public reference for customers/admin notifications.
+    Internal DB order.id remains private and is still used for routes/callbacks.
+    """
+    oid = getattr(order, "id", order)
+    secret = os.getenv("SECRET_KEY", "veyra-public-order-ref")
+    digest = hashlib.sha256(f"{secret}:order:{oid}".encode("utf-8")).digest()
+    code = base64.b32encode(digest).decode("ascii").rstrip("=")[:10]
+    return f"VYR-{code}"
+
+app.jinja_env.globals["public_order_ref"] = public_order_ref
+
 def customer_telegram_label(user):
     if not user or not user.telegram_id:
         return "❌ Not connected"
@@ -562,7 +576,7 @@ def customer_telegram_label(user):
 
 def customer_order_notification(o):
     item = f"{o.plan.product.name} — {o.plan.name}" if o.plan else (o.bundle.name if o.bundle else "Order")
-    return (f"🛒 NEW VEYRA ORDER #{o.id}\n\n"
+    return (f"🛒 NEW VEYRA ORDER {public_order_ref(o)}\n\n"
             f"👤 Customer: @{o.user.username}\n"
             f"📧 Email: {o.user.email}\n"
             f"📱 Telegram: {customer_telegram_label(o.user)}\n\n"
@@ -695,7 +709,7 @@ def create_telegram_order(user, plan):
     o = Order(user_id=user.id, plan_id=plan.id, sale_price=selling_price, cost_price=cost, profit=selling_price-cost)
     db.session.add(o)
     db.session.flush()
-    audit_note = f"Order #{o.id} created from Telegram for @{user.username} — {plan.product.name} / {plan.name}"
+    audit_note = f"Order {public_order_ref(o)} created from Telegram for @{user.username} — {plan.product.name} / {plan.name}"
     app.logger.info(audit_note)
     db.session.commit()
     notify_admins(customer_order_notification(o), "new_order", o)
@@ -712,14 +726,14 @@ def customer_subscriptions_text(user_id):
 
 def customer_order_text(o):
     item=f"{o.plan.product.name} — {o.plan.name}" if o.plan else (o.bundle.name if o.bundle else "Order")
-    text=f"🧾 Order #{o.id}\n📦 {item}\n💶 €{o.sale_price:.2f}\n📌 {o.status}"
+    text=f"🧾 Order {public_order_ref(o)}\n📦 {item}\n💶 €{o.sale_price:.2f}\n📌 {o.status}"
     if o.delivery:
         text += f"\n\n📦 Delivery\n{o.delivery.content}"
     return text
 
 def telegram_order_text(o):
     item = f"{o.plan.product.name} — {o.plan.name}" if o.plan else o.bundle.name
-    return (f"🧾 Order #{o.id}\n"
+    return (f"🧾 Order {public_order_ref(o)}\n"
             f"👤 @{o.user.username}\n"
             f"📦 {item}\n"
             f"💶 €{o.sale_price:.2f}\n"
@@ -785,11 +799,11 @@ def telegram_handle_update(update):
                 else:
                     o = create_telegram_order(customer, plan)
                     number = re.sub(r"\D", "", os.getenv("WHATSAPP_NUMBER", "+14242165211"))
-                    wa_text = f"Hello, I want to complete Veyra order #{o.id}. Product: {plan.product.name} - {plan.name}. Username: {customer.username}."
+                    wa_text = f"Hello, I want to complete my Veyra order {public_order_ref(o)}. Product: {plan.product.name} - {plan.name}. Username: {customer.username}."
                     wa = f"https://wa.me/{number}?text={quote(wa_text)}" if number else None
                     kb = {"inline_keyboard": [[{"text": "💬 Complete order on WhatsApp", "url": wa}],[{"text": "🛍 More products", "callback_data": "cust_products"}]]} if wa else {"inline_keyboard": [[{"text": "🛍 More products", "callback_data": "cust_products"}]]}
                     price = plan.sale_price if plan.sale_price is not None else plan.price
-                    send_telegram_chat(chat_id, f"✅ Order #{o.id} created!\n\n📦 {plan.product.name} — {plan.name}\n💰 €{price:.2f}\n🟡 Status: Pending\n\nComplete your order through WhatsApp:", kb)
+                    send_telegram_chat(chat_id, f"✅ Order {public_order_ref(o)} created!\n\n📦 {plan.product.name} — {plan.name}\n💰 €{price:.2f}\n🟡 Status: Pending\n\nComplete your order through WhatsApp:", kb)
             telegram_api("answerCallbackQuery", {"callback_query_id": cq.get("id"), "text": "Order created"})
             return
         if data == "cust_products":
@@ -892,10 +906,10 @@ def telegram_handle_update(update):
                                 sent = send_telegram_chat(o.user.telegram_id, f"✅ Veyra delivery for order #{o.id}\n\n{draft['content']}\n\nYour order is now completed.")
                                 d.sent_to_customer_telegram = sent
                                 db.session.commit()
-                            audit_note = f"Order #{o.id} delivered via Telegram by {uid}; previous status {previous}"
+                            audit_note = f"Order {public_order_ref(o)} delivered via Telegram by {uid}; previous status {previous}"
                             app.logger.info(audit_note)
-                            send_telegram_chat(chat_id, f"✅ Delivered and confirmed on website.\nOrder #{o.id} is now COMPLETED." + ("\n📨 Sent to customer's Telegram." if sent else "\nℹ️ Customer Telegram is not linked, so delivery is stored on the website only."))
-                            notify_admins(f"📦 Delivery confirmed from Telegram\nOrder #{o.id}\n@{o.user.username}\n€{o.sale_price:.2f}")
+                            send_telegram_chat(chat_id, f"✅ Delivered and confirmed on website.\nOrder {public_order_ref(o)} is now COMPLETED." + ("\n📨 Sent to customer's Telegram." if sent else "\nℹ️ Customer Telegram is not linked, so delivery is stored on the website only."))
+                            notify_admins(f"📦 Delivery confirmed from Telegram\nOrder {public_order_ref(o)}\n@{o.user.username}\n€{o.sale_price:.2f}")
                 TELEGRAM_DELIVERY_DRAFTS.pop(uid, None)
         elif data == "delivery_cancel":
             TELEGRAM_DELIVERY_DRAFTS.pop(uid, None)
@@ -1178,7 +1192,7 @@ def notify_admins(message, event="new_order", order=None):
         if event == "new_order" and order is not None:
             number = re.sub(r"\D", "", os.getenv("WHATSAPP_NUMBER", "+14242165211"))
             item = f"{order.plan.product.name} — {order.plan.name}" if order.plan else (order.bundle.name if order.bundle else "Order")
-            wa_text = f"Hello, I want to complete Veyra order #{order.id}. Product: {item}. Customer: @{order.user.username}."
+            wa_text = f"Hello, I want to complete my Veyra order {public_order_ref(order)}. Product: {item}. Customer: @{order.user.username}."
             wa = f"https://wa.me/{number}?text={quote(wa_text)}" if number else None
             rows = [[{"text": "📦 Deliver", "callback_data": f"deliver:{order.id}"}]]
             if wa:
@@ -1337,11 +1351,11 @@ def order(plan_id):
     if coupon:
         usage = CouponUsage.query.filter_by(coupon_id=coupon.id, user_id=current_user.id).first()
         if usage: usage.order_id = o.id
-    audit("New order", f"Order #{o.id} — {plan.product.name} / {plan.name} — €{final_price:.2f}"); db.session.commit()
+    audit("New order", f"Order {public_order_ref(o)} — {plan.product.name} / {plan.name} — €{final_price:.2f}"); db.session.commit()
     notify_admins(customer_order_notification(o), "new_order", o)
     support_row = AdminSetting.query.filter_by(key="support_whatsapp").first()
     number = re.sub(r"\D", "", (support_row.value if support_row and support_row.value else os.getenv("WHATSAPP_NUMBER", "+14242165211")))
-    msg = f"Hello, I want to order {plan.product.name} - {plan.name}. Order #{o.id}. Username: {current_user.username}"
+    msg = f"Hello, I want to order {plan.product.name} - {plan.name}. Reference: {public_order_ref(o)}. Username: {current_user.username}"
     wa = f"https://wa.me/{number}?text={quote(msg)}" if number else "#"
     return render_template("order.html", order=o, wa=wa)
 
@@ -1373,7 +1387,7 @@ def start_payment(order_id):
             app.logger.warning("Stripe checkout error: %s", data)
             flash("Unable to start Stripe checkout.")
             return redirect(url_for("order_payment_unavailable", order_id=o.id))
-        audit("Stripe checkout started", f"Order #{o.id}")
+        audit("Stripe checkout started", f"Order {public_order_ref(o)}")
         db.session.commit()
         return redirect(data["url"])
     except Exception as exc:
@@ -1401,8 +1415,8 @@ def payment_success():
     o=db.session.get(Order,oid)
     if not o or o.user_id != current_user.id: return ("Payment order not found",404)
     if data.get("payment_status") == "paid":
-        o.status="processing"; audit("Payment verified",f"Order #{o.id} paid via Stripe"); db.session.commit()
-        notify_admins(f"💳 Payment confirmed for order #{o.id}\n@{o.user.username}\n€{o.sale_price:.2f}", "payment")
+        o.status="processing"; audit("Payment verified",f"Order {public_order_ref(o)} paid via Stripe"); db.session.commit()
+        notify_admins(f"💳 Payment confirmed for order {public_order_ref(o)}\n@{o.user.username}\n€{o.sale_price:.2f}", "payment")
         flash("Payment confirmed. Your order is now being processed.")
     return redirect(url_for("account"))
 
@@ -1439,12 +1453,12 @@ def bundle_order(bundle_id):
     if coupon:
         usage = CouponUsage.query.filter_by(coupon_id=coupon.id, user_id=current_user.id).first()
         if usage: usage.order_id = o.id
-    audit("New bundle order", f"Order #{o.id} — {bundle.name} — €{final_price:.2f}"); db.session.commit()
+    audit("New bundle order", f"Order {public_order_ref(o)} — {bundle.name} — €{final_price:.2f}"); db.session.commit()
     notify_admins(customer_order_notification(o), "new_order", o)
     support_row = AdminSetting.query.filter_by(key="support_whatsapp").first()
     number = re.sub(r"\D", "", (support_row.value if support_row and support_row.value else os.getenv("WHATSAPP_NUMBER", "+14242165211")))
     item_names = " + ".join(f"{i.plan.product.name} ({i.plan.name})" for i in bundle.items)
-    msg = f"Hello, I want to order bundle: {bundle.name}. Items: {item_names}. Order #{o.id}. Username: {current_user.username}"
+    msg = f"Hello, I want to order bundle: {bundle.name}. Items: {item_names}. Reference: {public_order_ref(o)}. Username: {current_user.username}"
     wa = f"https://wa.me/{number}?text={quote(msg)}" if number else "#"
     return render_template("order.html", order=o, wa=wa)
 
@@ -1635,7 +1649,7 @@ def admin_order_deliver(order_id):
         db.session.add(OrderDelivery(order_id=o.id, content=content, delivered_by_telegram_id=None, sent_to_customer_telegram=False))
     previous=o.status
     complete_order_record(o, source=f"web:{current_user.username}")
-    audit("Order delivered", f"Order #{o.id}: {previous} → completed")
+    audit("Order delivered", f"Order {public_order_ref(o)}: {previous} → completed")
     db.session.commit()
     flash("Delivery saved and order completed.")
     if o.user.telegram_id:
@@ -1684,10 +1698,10 @@ def order_status(order_id,status):
         complete_order_record(o, source="admin")
     else:
         o.status = status
-    audit("Order status", f"Order #{o.id}: {previous} → {status}")
+    audit("Order status", f"Order {public_order_ref(o)}: {previous} → {status}")
     db.session.commit()
     if status == "completed" and previous != "completed":
-        notify_admins(f"✅ Order #{o.id} completed\n@{o.user.username}\n€{o.sale_price:.2f}\nProfit: €{o.profit:.2f}")
+        notify_admins(f"✅ Order {public_order_ref(o)} completed\n@{o.user.username}\n€{o.sale_price:.2f}\nProfit: €{o.profit:.2f}")
     return redirect(url_for("admin"))
 
 
