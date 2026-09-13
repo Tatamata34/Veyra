@@ -508,7 +508,7 @@ def admin_required():
 def inject_now():
     return {"now": datetime.utcnow()}
 
-def apply_coupon(code, subtotal, user_id=None):
+def apply_coupon(code, subtotal, user_id=None, plan_id=None):
     if not code:
         return 0.0, None, ""
     c = Coupon.query.filter_by(code=code.strip().upper(), active=True).first()
@@ -520,6 +520,14 @@ def apply_coupon(code, subtotal, user_id=None):
         return 0.0, None, "This coupon has reached its usage limit."
     if user_id and CouponUsage.query.filter_by(coupon_id=c.id, user_id=user_id).first():
         return 0.0, None, "You have already used this coupon."
+    if "V21CouponRule" in globals():
+        rule = V21CouponRule.query.filter_by(coupon_id=c.id).first()
+        if rule and rule.enabled:
+            plan_obj = db.session.get(Plan, plan_id) if plan_id else None
+            if rule.product_id and (not plan_obj or plan_obj.product_id != rule.product_id):
+                return 0.0, None, "This coupon does not apply to this product."
+            if rule.category_id and (not plan_obj or plan_obj.product.category_id != rule.category_id):
+                return 0.0, None, "This coupon does not apply to this category."
     discount = subtotal * (c.discount_percent / 100.0) + c.discount_fixed
     return max(0.0, min(subtotal, discount)), c, ""
 
@@ -1386,7 +1394,7 @@ def order(plan_id):
         flash("Plani nuk është i disponueshëm.")
         return redirect(url_for("index"))
     selling_price = plan.sale_price if plan.sale_price is not None else plan.price
-    discount, coupon, coupon_error = apply_coupon(request.form.get("coupon"), selling_price, current_user.id)
+    discount, coupon, coupon_error = apply_coupon(request.form.get("coupon"), selling_price, current_user.id, plan.id)
     if request.form.get("coupon") and coupon_error:
         flash(coupon_error)
         return redirect(url_for("product", slug=plan.product.slug))
@@ -2400,3 +2408,411 @@ with app.app_context():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT",5000)), debug=True)
+
+
+# ========================= VEYRA v2.1 ADDITIVE LAYER =========================
+# This layer is intentionally additive: the existing ordering/payment routes are kept intact.
+from sqlalchemy import Text
+
+class V21ProductMeta(db.Model):
+    __tablename__ = "v21_product_meta"
+    id = db.Column(db.Integer, primary_key=True)
+    product_id = db.Column(db.Integer, db.ForeignKey("product.id"), unique=True, nullable=False)
+    product_type = db.Column(db.String(50), default="Digital subscription")
+    region = db.Column(db.String(120), default="Worldwide")
+    delivery = db.Column(db.String(180), default="Fast digital delivery")
+    guarantee = db.Column(db.String(180), default="Support included")
+    receive_type = db.Column(db.String(50), default="Personal Account")
+    included_json = db.Column(Text, default="[]")
+    faq_json = db.Column(Text, default="[]")
+    badges_json = db.Column(Text, default="[]")
+    keywords = db.Column(db.String(500), default="")
+    desc_i18n = db.Column(Text, default="{}")
+    product = db.relationship("Product", backref=db.backref("v21_meta", uselist=False))
+
+class V21PaymentMethod(db.Model):
+    __tablename__ = "v21_payment_methods"
+    id = db.Column(db.Integer, primary_key=True)
+    code = db.Column(db.String(40), unique=True, nullable=False)
+    name = db.Column(db.String(80), nullable=False)
+    enabled = db.Column(db.Boolean, default=False)
+    sort_order = db.Column(db.Integer, default=0)
+
+class V21Notification(db.Model):
+    __tablename__ = "v21_notifications"
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    title = db.Column(db.String(180), nullable=False)
+    body = db.Column(Text, default="")
+    kind = db.Column(db.String(40), default="account")
+    read = db.Column(db.Boolean, default=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    user = db.relationship("User")
+
+class V21Ticket(db.Model):
+    __tablename__ = "v21_tickets"
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    subject = db.Column(db.String(180), nullable=False)
+    category = db.Column(db.String(50), default="Other")
+    status = db.Column(db.String(30), default="open")
+    order_id = db.Column(db.Integer, db.ForeignKey("order.id"), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    user = db.relationship("User")
+    order = db.relationship("Order")
+    replies = db.relationship("V21TicketReply", backref="ticket", cascade="all, delete-orphan", order_by="V21TicketReply.created_at")
+
+class V21TicketReply(db.Model):
+    __tablename__ = "v21_ticket_replies"
+    id = db.Column(db.Integer, primary_key=True)
+    ticket_id = db.Column(db.Integer, db.ForeignKey("v21_tickets.id"), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True)
+    is_admin = db.Column(db.Boolean, default=False)
+    message = db.Column(Text, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    user = db.relationship("User")
+
+class V21RecentlyViewed(db.Model):
+    __tablename__ = "v21_recently_viewed"
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True)
+    session_key = db.Column(db.String(120), nullable=True)
+    product_id = db.Column(db.Integer, db.ForeignKey("product.id"), nullable=False)
+    viewed_at = db.Column(db.DateTime, default=datetime.utcnow)
+    product = db.relationship("Product")
+
+class V21Deal(db.Model):
+    __tablename__ = "v21_deals"
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(160), nullable=False)
+    description = db.Column(Text, default="")
+    price = db.Column(db.Float, nullable=False, default=0)
+    active = db.Column(db.Boolean, default=True)
+    featured = db.Column(db.Boolean, default=False)
+    starts_at = db.Column(db.DateTime, nullable=True)
+    ends_at = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    legacy_bundle_id = db.Column(db.Integer, db.ForeignKey("bundle.id"), nullable=True)
+    items = db.relationship("V21DealItem", backref="deal", cascade="all, delete-orphan")
+
+class V21DealItem(db.Model):
+    __tablename__ = "v21_deal_items"
+    id = db.Column(db.Integer, primary_key=True)
+    deal_id = db.Column(db.Integer, db.ForeignKey("v21_deals.id"), nullable=False)
+    plan_id = db.Column(db.Integer, db.ForeignKey("plan.id"), nullable=False)
+    quantity = db.Column(db.Integer, default=1)
+    plan = db.relationship("Plan")
+
+class V21CouponRule(db.Model):
+    __tablename__ = "v21_coupon_rules"
+    id = db.Column(db.Integer, primary_key=True)
+    coupon_id = db.Column(db.Integer, db.ForeignKey("coupon.id"), unique=True, nullable=False)
+    product_id = db.Column(db.Integer, db.ForeignKey("product.id"), nullable=True)
+    category_id = db.Column(db.Integer, db.ForeignKey("category.id"), nullable=True)
+    enabled = db.Column(db.Boolean, default=True)
+    coupon = db.relationship("Coupon", backref=db.backref("v21_rule", uselist=False))
+
+V21_LANG = {
+    "en": {"Digital subscription":"Digital subscription","Worldwide":"Worldwide","Fast digital delivery":"Fast digital delivery","Support included":"Support included","Personal Account":"Personal Account","Account Upgrade":"Account Upgrade","Shared Account":"Shared Account","Shared Profile":"Shared Profile","Activation Key":"Activation Key","Overview":"Overview","Pricing":"Pricing","What's included":"What's included","Delivery":"Delivery","Guarantee":"Guarantee","Region":"Region","FAQ":"FAQ","Buy Now":"Buy Now","Renew":"Renew","Expiring Soon":"Expiring Soon","Days remaining":"Days remaining","My Orders":"My Orders","My Subscriptions":"My Subscriptions","Notifications":"Notifications","Account Settings":"Account Settings","Support Tickets":"Support Tickets","Recently Viewed":"Recently Viewed","Savings":"Savings","Amount saved":"Amount saved","Best Seller":"BEST SELLER","Popular":"POPULAR","New":"NEW","Best Value":"BEST VALUE","Instant Delivery":"INSTANT DELIVERY","Premium":"PREMIUM","Limited Offer":"LIMITED OFFER","Create Ticket":"Create Ticket","Order Issue":"Order Issue","Account Issue":"Account Issue","Payment Issue":"Payment Issue","Product Question":"Product Question","Other":"Other","Open":"Open","Pending":"Pending","Resolved":"Resolved","Payment methods":"Payment methods","Enabled":"Enabled","Disabled":"Disabled","Save changes":"Save changes","Product metadata":"Product metadata","Deals & bundles":"Deals & bundles","Coupon rules":"Coupon rules","Smart search":"Smart search","No products found":"No products found","Personal account":"Personal account"},
+    "de": {"Digital subscription":"Digitales Abonnement","Worldwide":"Weltweit","Fast digital delivery":"Schnelle digitale Lieferung","Support included":"Support inklusive","Personal Account":"Persönliches Konto","Account Upgrade":"Konto-Upgrade","Shared Account":"Geteiltes Konto","Shared Profile":"Geteiltes Profil","Activation Key":"Aktivierungsschlüssel","Overview":"Übersicht","Pricing":"Preise","What's included":"Enthalten","Delivery":"Lieferung","Guarantee":"Garantie","Region":"Region","FAQ":"FAQ","Buy Now":"Jetzt kaufen","Renew":"Verlängern","Expiring Soon":"Läuft bald ab","Days remaining":"Tage verbleibend","My Orders":"Meine Bestellungen","My Subscriptions":"Meine Abonnements","Notifications":"Benachrichtigungen","Account Settings":"Kontoeinstellungen","Support Tickets":"Support-Tickets","Recently Viewed":"Zuletzt angesehen","Savings":"Ersparnis","Amount saved":"Gespart","Best Seller":"BESTSELLER","Popular":"BELIEBT","New":"NEU","Best Value":"BESTES ANGEBOT","Instant Delivery":"SOFORT-LIEFERUNG","Premium":"PREMIUM","Limited Offer":"LIMITIERT","Create Ticket":"Ticket erstellen","Order Issue":"Bestellproblem","Account Issue":"Kontoproblem","Payment Issue":"Zahlungsproblem","Product Question":"Produktfrage","Other":"Sonstiges","Open":"Offen","Pending":"Ausstehend","Resolved":"Gelöst","Payment methods":"Zahlungsmethoden","Enabled":"Aktiv","Disabled":"Deaktiviert","Save changes":"Änderungen speichern","Product metadata":"Produktdaten","Deals & bundles":"Angebote & Bundles","Coupon rules":"Gutscheinregeln","Smart search":"Intelligente Suche","No products found":"Keine Produkte gefunden","Personal account":"Persönliches Konto"},
+    "fr": {"Digital subscription":"Abonnement numérique","Worldwide":"Monde entier","Fast digital delivery":"Livraison numérique rapide","Support included":"Support inclus","Personal Account":"Compte personnel","Account Upgrade":"Mise à niveau du compte","Shared Account":"Compte partagé","Shared Profile":"Profil partagé","Activation Key":"Clé d’activation","Overview":"Aperçu","Pricing":"Tarifs","What's included":"Inclus","Delivery":"Livraison","Guarantee":"Garantie","Region":"Région","FAQ":"FAQ","Buy Now":"Acheter maintenant","Renew":"Renouveler","Expiring Soon":"Expire bientôt","Days remaining":"Jours restants","My Orders":"Mes commandes","My Subscriptions":"Mes abonnements","Notifications":"Notifications","Account Settings":"Paramètres du compte","Support Tickets":"Tickets support","Recently Viewed":"Vus récemment","Savings":"Économie","Amount saved":"Montant économisé","Best Seller":"MEILLEURE VENTE","Popular":"POPULAIRE","New":"NOUVEAU","Best Value":"MEILLEUR PRIX","Instant Delivery":"LIVRAISON INSTANTANÉE","Premium":"PREMIUM","Limited Offer":"OFFRE LIMITÉE","Create Ticket":"Créer un ticket","Order Issue":"Problème de commande","Account Issue":"Problème de compte","Payment Issue":"Problème de paiement","Product Question":"Question produit","Other":"Autre","Open":"Ouvert","Pending":"En attente","Resolved":"Résolu","Payment methods":"Modes de paiement","Enabled":"Activé","Disabled":"Désactivé","Save changes":"Enregistrer","Product metadata":"Données produit","Deals & bundles":"Offres & bundles","Coupon rules":"Règles de coupons","Smart search":"Recherche intelligente","No products found":"Aucun produit trouvé","Personal account":"Compte personnel"},
+    "sq": {"Digital subscription":"Abonim digjital","Worldwide":"Në gjithë botën","Fast digital delivery":"Dorëzim i shpejtë digjital","Support included":"Mbështetja përfshihet","Personal Account":"Llogari personale","Account Upgrade":"Upgrade i llogarisë","Shared Account":"Llogari e përbashkët","Shared Profile":"Profil i përbashkët","Activation Key":"Çelës aktivizimi","Overview":"Përmbledhje","Pricing":"Çmimi","What's included":"Çfarë përfshihet","Delivery":"Dorëzimi","Guarantee":"Garancia","Region":"Regjioni","FAQ":"FAQ","Buy Now":"Bli tani","Renew":"Rinovo","Expiring Soon":"Skadon së shpejti","Days remaining":"Ditë të mbetura","My Orders":"Porositë e mia","My Subscriptions":"Abonimet e mia","Notifications":"Njoftimet","Account Settings":"Cilësimet e llogarisë","Support Tickets":"Tickets e supportit","Recently Viewed":"Shikuar së fundmi","Savings":"Kursimi","Amount saved":"Shuma e kursyer","Best Seller":"MË I SHITURI","Popular":"POPULAR","New":"I RI","Best Value":"VLERA MË E MIRË","Instant Delivery":"DORËZIM I MENJËHERSHËM","Premium":"PREMIUM","Limited Offer":"OFERTË E KUFIZUAR","Create Ticket":"Krijo ticket","Order Issue":"Problem me porosinë","Account Issue":"Problem me llogarinë","Payment Issue":"Problem me pagesën","Product Question":"Pyetje për produktin","Other":"Tjetër","Open":"Hapur","Pending":"Në pritje","Resolved":"Zgjidhur","Payment methods":"Metodat e pagesës","Enabled":"Aktive","Disabled":"Joaktive","Save changes":"Ruaj ndryshimet","Product metadata":"Të dhënat e produktit","Deals & bundles":"Oferta & bundle","Coupon rules":"Rregullat e kuponëve","Smart search":"Kërkim inteligjent","No products found":"Nuk u gjet asnjë produkt","Personal account":"Llogari personale"}
+}
+
+V21_EXTRA = {
+"en":{"Available":"Available","Unavailable":"Unavailable","products":"products","ACCOUNT":"ACCOUNT","SHOP":"SHOP","OFFERS":"OFFERS","HISTORY":"HISTORY","What you receive":"What you receive","WHAT YOU RECEIVE":"WHAT YOU RECEIVE","This is shown before checkout so you know exactly what you are buying.":"This is shown before checkout so you know exactly what you are buying.","Everything you need":"Everything you need","Questions":"Questions","Subscription status":"Subscription status","Order history":"Order history","Latest":"Latest","Need help?":"Need help?","Status:":"Status:","Expired":"Expired","Mark all read":"Mark all read","Mark read":"Mark read","No notifications.":"No notifications.","How can we help?":"How can we help?","Subject":"Subject","Related order (optional)":"Related order (optional)","Describe the issue...":"Describe the issue...","Your tickets":"Your tickets","No tickets yet.":"No tickets yet.","Write a reply...":"Write a reply...","Send reply":"Send reply","Control center":"Control center","Future checkout methods":"Future checkout methods","All new methods are disabled by default. The existing payment/order routes remain unchanged.":"All new methods are disabled by default. The existing payment/order routes remain unchanged.","What customers see":"What customers see","Select product":"Select product","Search aliases e.g. spo, spotify, music":"Search aliases e.g. spo, spotify, music","What's included — one item per line":"What's included — one item per line","FAQ — one per line: Question | Answer":"FAQ — one per line: Question | Answer","Create a deal from existing plans":"Create a deal from existing plans","Deal name":"Deal name","Bundle price":"Bundle price","Description":"Description","Create deal":"Create deal","Scope existing coupons":"Scope existing coupons","All products":"All products","All categories":"All categories","History":"History"},
+"de":{"Available":"Verfügbar","Unavailable":"Nicht verfügbar","products":"Produkte","ACCOUNT":"KONTO","SHOP":"SHOP","OFFERS":"ANGEBOTE","HISTORY":"VERLAUF","What you receive":"Was du erhältst","WHAT YOU RECEIVE":"WAS DU ERHÄLTST","This is shown before checkout so you know exactly what you are buying.":"Dies wird vor dem Checkout angezeigt, damit du genau weißt, was du kaufst.","Everything you need":"Alles, was du brauchst","Questions":"Fragen","Subscription status":"Abostatus","Order history":"Bestellverlauf","Latest":"Neueste","Need help?":"Brauchst du Hilfe?","Expired":"Abgelaufen","Mark all read":"Alle als gelesen markieren","Mark read":"Als gelesen markieren","No notifications.":"Keine Benachrichtigungen.","How can we help?":"Wie können wir helfen?","Subject":"Betreff","Related order (optional)":"Zugehörige Bestellung (optional)","Describe the issue...":"Beschreibe das Problem...","Your tickets":"Deine Tickets","No tickets yet.":"Noch keine Tickets.","Write a reply...":"Antwort schreiben...","Send reply":"Antwort senden","Future checkout methods":"Zukünftige Zahlungsmethoden","What customers see":"Was Kunden sehen","Select product":"Produkt auswählen","Create a deal from existing plans":"Angebot aus bestehenden Plänen erstellen","Deal name":"Angebotsname","Bundle price":"Bundle-Preis","Description":"Beschreibung","Create deal":"Angebot erstellen","Scope existing coupons":"Bestehende Gutscheine begrenzen","All products":"Alle Produkte","All categories":"Alle Kategorien"},
+"fr":{"Available":"Disponible","Unavailable":"Indisponible","products":"produits","ACCOUNT":"COMPTE","SHOP":"BOUTIQUE","OFFERS":"OFFRES","HISTORY":"HISTORIQUE","What you receive":"Ce que vous recevez","WHAT YOU RECEIVE":"CE QUE VOUS RECEVEZ","This is shown before checkout so you know exactly what you are buying.":"Ceci est affiché avant le paiement pour savoir exactement ce que vous achetez.","Everything you need":"Tout ce dont vous avez besoin","Questions":"Questions","Subscription status":"Statut de l’abonnement","Order history":"Historique des commandes","Latest":"Dernières","Need help?":"Besoin d’aide ?","Expired":"Expiré","Mark all read":"Tout marquer comme lu","Mark read":"Marquer comme lu","No notifications.":"Aucune notification.","How can we help?":"Comment pouvons-nous vous aider ?","Subject":"Sujet","Related order (optional)":"Commande liée (optionnel)","Describe the issue...":"Décrivez le problème...","Your tickets":"Vos tickets","No tickets yet.":"Aucun ticket.","Write a reply...":"Écrire une réponse...","Send reply":"Envoyer la réponse","Future checkout methods":"Futurs modes de paiement","What customers see":"Ce que voient les clients","Select product":"Choisir un produit","Create a deal from existing plans":"Créer une offre avec les plans existants","Deal name":"Nom de l’offre","Bundle price":"Prix du bundle","Description":"Description","Create deal":"Créer l’offre","Scope existing coupons":"Limiter les coupons existants","All products":"Tous les produits","All categories":"Toutes les catégories"},
+"sq":{"Available":"Në dispozicion","Unavailable":"Jo në dispozicion","products":"produkte","ACCOUNT":"LLOGARIA","SHOP":"DYQANI","OFFERS":"OFERTA","HISTORY":"HISTORIA","What you receive":"Çfarë merrni","WHAT YOU RECEIVE":"ÇFARË MERRNI","This is shown before checkout so you know exactly what you are buying.":"Kjo shfaqet para checkout-it që ta dini saktë çfarë po blini.","Everything you need":"Gjithçka që ju nevojitet","Questions":"Pyetje","Subscription status":"Statusi i abonimit","Order history":"Historia e porosive","Latest":"Të fundit","Need help?":"Keni nevojë për ndihmë?","Expired":"Skaduar","Mark all read":"Shëno të gjitha si të lexuara","Mark read":"Shëno si të lexuar","No notifications.":"Nuk ka njoftime.","How can we help?":"Si mund t'ju ndihmojmë?","Subject":"Subjekti","Related order (optional)":"Porosia përkatëse (opsionale)","Describe the issue...":"Përshkruani problemin...","Your tickets":"Ticket-at tuaja","No tickets yet.":"Ende nuk ka ticket-a.","Write a reply...":"Shkruaj përgjigje...","Send reply":"Dërgo përgjigjen","Future checkout methods":"Metodat e ardhshme të pagesës","What customers see":"Çfarë shohin klientët","Select product":"Zgjidh produktin","Create a deal from existing plans":"Krijo ofertë nga planet ekzistuese","Deal name":"Emri i ofertës","Bundle price":"Çmimi i bundle","Description":"Përshkrimi","Create deal":"Krijo ofertën","Scope existing coupons":"Kufizo kuponët ekzistues","All products":"Të gjitha produktet","All categories":"Të gjitha kategoritë"}}
+for _l,_vals in V21_EXTRA.items(): V21_LANG[_l].update(_vals)
+
+def v21_tr(text):
+    lang = getattr(request, "lang", None) or session.get("lang", "en")
+    return V21_LANG.get(lang, V21_LANG["en"]).get(text, text)
+
+def v21_json(value, default):
+    try:
+        return json.loads(value) if value else default
+    except Exception:
+        return default
+
+def v21_meta(product):
+    m = V21ProductMeta.query.filter_by(product_id=product.id).first()
+    if not m:
+        m = V21ProductMeta(product_id=product.id, product_type="Digital subscription", region="Worldwide", delivery="Fast digital delivery", guarantee="Support included", receive_type="Personal Account")
+        db.session.add(m); db.session.commit()
+    return m
+
+def v21_billing(months):
+    if months == 1: return "/month"
+    if months == 3: return "/3 months"
+    if months == 6: return "/6 months"
+    if months == 12: return "/year"
+    if months == 18: return "/18 months"
+    if months <= 0: return "one-time"
+    return f"/{months} months"
+
+def v21_plan_price(plan):
+    return float(plan.sale_price if plan.sale_price is not None else plan.price)
+
+def v21_discount(plan):
+    old = float(plan.price or 0); now = v21_plan_price(plan)
+    return round(max(0, (old-now)/old*100)) if old else 0
+
+def v21_badges(product, plan=None):
+    m = v21_meta(product); badges = v21_json(m.badges_json, [])
+    if product.featured and "POPULAR" not in badges: badges.append("POPULAR")
+    if plan and v21_discount(plan) >= 20 and "BEST VALUE" not in badges: badges.append("BEST VALUE")
+    return badges
+
+def v21_expiry(sub):
+    now = datetime.utcnow()
+    if sub.expires_at <= now:
+        sub.active = False; return 0, "expired"
+    days = max(0, (sub.expires_at-now).days)
+    return days, "soon" if days <= 7 else "active"
+
+def v21_touch(product):
+    key = session.get("v21_rv")
+    if not key:
+        key = secrets.token_urlsafe(24); session["v21_rv"] = key
+    q = V21RecentlyViewed.query.filter_by(product_id=product.id)
+    if current_user.is_authenticated: q = q.filter_by(user_id=current_user.id)
+    else: q = q.filter_by(session_key=key, user_id=None)
+    row = q.first()
+    if row: row.viewed_at = datetime.utcnow()
+    else: db.session.add(V21RecentlyViewed(product_id=product.id, user_id=current_user.id if current_user.is_authenticated else None, session_key=None if current_user.is_authenticated else key))
+    db.session.commit()
+
+def v21_recent():
+    q = V21RecentlyViewed.query.order_by(V21RecentlyViewed.viewed_at.desc())
+    if current_user.is_authenticated: q=q.filter_by(user_id=current_user.id)
+    else: q=q.filter_by(session_key=session.get("v21_rv"), user_id=None)
+    rows=q.limit(8).all(); seen=set(); out=[]
+    for r in rows:
+        if r.product_id not in seen and r.product and r.product.active: out.append(r.product); seen.add(r.product_id)
+    return out
+
+def v21_notify(user_id, title, body, kind="account"):
+    db.session.add(V21Notification(user_id=user_id,title=title,body=body,kind=kind))
+
+def v21_deal_active(d):
+    now=datetime.utcnow()
+    return d.active and (not d.starts_at or d.starts_at<=now) and (not d.ends_at or d.ends_at>=now)
+
+def v21_payment_methods():
+    defaults=[("card","Card"),("paypal","PayPal"),("stripe","Stripe"),("crypto","Crypto"),("other","Other")]
+    rows=[]
+    for i,(code,name) in enumerate(defaults):
+        row=V21PaymentMethod.query.filter_by(code=code).first()
+        if not row:
+            row=V21PaymentMethod(code=code,name=name,enabled=False,sort_order=i); db.session.add(row)
+        rows.append(row)
+    db.session.commit(); return rows
+
+@app.context_processor
+def v21_context():
+    unread = V21Notification.query.filter_by(user_id=current_user.id, read=False).count() if current_user.is_authenticated else 0
+    return {"v21_tr": v21_tr, "v21_billing": v21_billing, "v21_meta": v21_meta, "v21_discount": v21_discount, "v21_badges": v21_badges, "v21_unread": unread}
+
+# New storefront endpoints are separate so legacy payment/order URLs remain untouched.
+@app.route("/v21/search")
+def v21_search():
+    q=request.args.get("q","").strip().lower()
+    if not q: return {"results":[]}
+    rows=[]
+    for p in Product.query.filter_by(active=True).all():
+        m=v21_meta(p); hay=f"{p.name} {p.category.name} {m.keywords}".lower()
+        if q in hay or any(part.startswith(q) for part in re.split(r"[\s,;/|]+",hay) if part):
+            rows.append({"name":p.name,"slug":p.slug,"category":p.category.name,"url":url_for("product",slug=p.slug)})
+    return {"results":rows[:8]}
+
+@app.route("/v21/wishlist/<int:product_id>", methods=["POST"])
+@login_required
+def v21_wishlist(product_id):
+    p=db.session.get(Product,product_id)
+    if not p:return ("Not found",404)
+    row=Wishlist.query.filter_by(user_id=current_user.id,product_id=p.id).first()
+    if row: db.session.delete(row); state=False
+    else: db.session.add(Wishlist(user_id=current_user.id,product_id=p.id)); state=True
+    db.session.commit()
+    if request.headers.get("X-Requested-With")=="XMLHttpRequest": return {"ok":True,"saved":state}
+    return redirect(request.referrer or url_for("product",slug=p.slug))
+
+@app.route("/v21/notifications/read/<int:notification_id>", methods=["POST"])
+@login_required
+def v21_notification_read(notification_id):
+    n=db.session.get(V21Notification,notification_id)
+    if not n or n.user_id!=current_user.id:return ("Not found",404)
+    n.read=True;db.session.commit();return redirect(url_for("v21_notifications"))
+
+@app.route("/v21/notifications/read-all", methods=["POST"])
+@login_required
+def v21_notification_read_all():
+    V21Notification.query.filter_by(user_id=current_user.id,read=False).update({"read":True});db.session.commit();return redirect(url_for("v21_notifications"))
+
+@app.route("/v21/notifications")
+@login_required
+def v21_notifications():
+    notes=V21Notification.query.filter_by(user_id=current_user.id).order_by(V21Notification.created_at.desc()).limit(100).all()
+    return render_template("v21_notifications.html",notifications=notes)
+
+@app.route("/v21/support", methods=["GET","POST"])
+@login_required
+def v21_support():
+    if request.method=="POST":
+        subject=request.form.get("subject","").strip() or "Support request"
+        category=request.form.get("category","Other")
+        msg=request.form.get("message","").strip()
+        if not msg: flash("Please enter your message."); return redirect(url_for("v21_support"))
+        t=V21Ticket(user_id=current_user.id,subject=subject,category=category,order_id=int(request.form["order_id"]) if request.form.get("order_id") else None)
+        db.session.add(t);db.session.flush();db.session.add(V21TicketReply(ticket_id=t.id,user_id=current_user.id,message=msg,is_admin=False));db.session.commit()
+        return redirect(url_for("v21_ticket",ticket_id=t.id))
+    tickets=V21Ticket.query.filter_by(user_id=current_user.id).order_by(V21Ticket.updated_at.desc()).all()
+    return render_template("v21_support.html",tickets=tickets,orders=Order.query.filter_by(user_id=current_user.id).order_by(Order.created_at.desc()).limit(30).all())
+
+@app.route("/v21/support/<int:ticket_id>", methods=["GET","POST"])
+@login_required
+def v21_ticket(ticket_id):
+    t=db.session.get(V21Ticket,ticket_id)
+    if not t or t.user_id!=current_user.id:return ("Not found",404)
+    if request.method=="POST":
+        msg=request.form.get("message","").strip()
+        if msg: db.session.add(V21TicketReply(ticket_id=t.id,user_id=current_user.id,message=msg,is_admin=False));t.status="open";db.session.commit()
+        return redirect(url_for("v21_ticket",ticket_id=t.id))
+    return render_template("v21_ticket.html",ticket=t)
+
+@app.route("/v21/coupon/check", methods=["POST"])
+@login_required
+def v21_coupon_check():
+    code=request.form.get("coupon","").strip().upper(); plan_id=request.form.get("plan_id",type=int)
+    c=Coupon.query.filter(db.func.upper(Coupon.code)==code,Coupon.active==True).first()
+    if not c:return {"ok":False,"message":"Invalid coupon"}
+    if c.expires_at and c.expires_at<datetime.utcnow():return {"ok":False,"message":"Coupon expired"}
+    if c.max_uses and c.used_count>=c.max_uses:return {"ok":False,"message":"Coupon usage limit reached"}
+    if CouponUsage.query.filter_by(coupon_id=c.id,user_id=current_user.id).first():return {"ok":False,"message":"Coupon already used"}
+    if plan_id:
+        plan=db.session.get(Plan,plan_id)
+        rule=V21CouponRule.query.filter_by(coupon_id=c.id).first()
+        if rule and rule.enabled and ((rule.product_id and (not plan or plan.product_id!=rule.product_id)) or (rule.category_id and (not plan or plan.product.category_id!=rule.category_id))):return {"ok":False,"message":"Coupon does not apply to this product"}
+    return {"ok":True,"percent":c.discount_percent or 0,"fixed":c.discount_fixed or 0}
+
+# v2.1 admin center
+@app.route("/admin/v21", methods=["GET","POST"])
+@login_required
+def admin_v21():
+    if not current_user.is_admin:return ("Forbidden",403)
+    methods=v21_payment_methods()
+    if request.method=="POST":
+        action=request.form.get("action")
+        if action=="payment":
+            for m in methods:m.enabled=request.form.get(f"payment_{m.code}")=="on"
+            db.session.commit();flash("Payment methods updated.")
+        elif action=="meta":
+            p=db.session.get(Product,request.form.get("product_id",type=int))
+            if p:
+                m=v21_meta(p);m.product_type=request.form.get("product_type","Digital subscription");m.region=request.form.get("region","Worldwide");m.delivery=request.form.get("delivery","Fast digital delivery");m.guarantee=request.form.get("guarantee","Support included");m.receive_type=request.form.get("receive_type","Personal Account");m.keywords=request.form.get("keywords","")
+                m.included_json=json.dumps([x.strip() for x in request.form.get("included","").splitlines() if x.strip()]);m.badges_json=json.dumps(request.form.getlist("badges"));m.faq_json=json.dumps([{"q":x.split("|",1)[0].strip(),"a":x.split("|",1)[1].strip()} for x in request.form.get("faq","").splitlines() if "|" in x],ensure_ascii=False);db.session.commit();flash("Product metadata saved.")
+        elif action=="deal":
+            ids=[int(x) for x in request.form.getlist("plan_ids") if x.isdigit()];plans=[db.session.get(Plan,x) for x in ids];plans=[x for x in plans if x and x.active]
+            if plans:
+                price=float(request.form.get("deal_price",0) or 0)
+                legacy=Bundle(name=request.form.get("deal_name","New Deal"),description=request.form.get("deal_description","") ,price=price,active=True,featured=request.form.get("featured")=="on")
+                db.session.add(legacy);db.session.flush()
+                for p in plans: db.session.add(BundleItem(bundle_id=legacy.id,plan_id=p.id,quantity=1))
+                def _dt(name):
+                    value=request.form.get(name,"").strip()
+                    if not value:return None
+                    try:return datetime.fromisoformat(value)
+                    except ValueError:return None
+                d=V21Deal(name=legacy.name,description=legacy.description,price=price,featured=legacy.featured,legacy_bundle_id=legacy.id,starts_at=_dt("starts_at"),ends_at=_dt("ends_at"))
+                db.session.add(d);db.session.flush();[db.session.add(V21DealItem(deal_id=d.id,plan_id=p.id)) for p in plans];db.session.commit();flash("Deal created.")
+        elif action=="deal_toggle":
+            d=db.session.get(V21Deal,request.form.get("deal_id",type=int));
+            if d:d.active=not d.active;db.session.commit()
+        elif action=="coupon_rule":
+            c=db.session.get(Coupon,request.form.get("coupon_id",type=int))
+            if c:
+                r=V21CouponRule.query.filter_by(coupon_id=c.id).first()
+                if not r:r=V21CouponRule(coupon_id=c.id);db.session.add(r)
+                r.product_id=request.form.get("product_id",type=int) or None
+                r.category_id=request.form.get("category_id",type=int) or None
+                r.enabled=request.form.get("enabled")=="on"
+                db.session.commit();flash("Coupon rule saved.")
+        return redirect(url_for("admin_v21"))
+    products=Product.query.order_by(Product.sort_order,Product.name).all();deals=V21Deal.query.order_by(V21Deal.created_at.desc()).all();coupons=Coupon.query.order_by(Coupon.id.desc()).all();tickets=V21Ticket.query.order_by(V21Ticket.updated_at.desc()).limit(50).all();plans=Plan.query.filter_by(active=True).all()
+    return render_template("v21_admin.html",methods=methods,products=products,deals=deals,coupons=coupons,tickets=tickets,plans=plans)
+
+@app.route("/admin/v21/ticket/<int:ticket_id>/reply", methods=["POST"])
+@login_required
+def admin_v21_ticket_reply(ticket_id):
+    if not current_user.is_admin:return ("Forbidden",403)
+    t=db.session.get(V21Ticket,ticket_id)
+    if not t:return ("Not found",404)
+    msg=request.form.get("message","").strip()
+    if msg:
+        db.session.add(V21TicketReply(ticket_id=t.id,user_id=current_user.id,is_admin=True,message=msg));t.status=request.form.get("status","pending");v21_notify(t.user_id,"Support update",f"Your ticket #{t.id} has a new reply.","support");db.session.commit()
+    return redirect(url_for("admin_v21"))
+
+# Use the v2.1 storefront/dashboard while preserving legacy route endpoints for checkout/payment.
+def v21_index():
+    products=Product.query.filter_by(active=True).order_by(Product.sort_order,Product.id).all();categories=Category.query.order_by(Category.name).all();deals=[d for d in V21Deal.query.order_by(V21Deal.created_at.desc()).all() if v21_deal_active(d)];recent=v21_recent()
+    return render_template("v21_index.html",products=products,categories=categories,deals=deals,recent=recent)
+
+def v21_product(slug):
+    p=Product.query.filter_by(slug=slug,active=True).first_or_404();v21_touch(p);reviews=Review.query.filter_by(product_id=p.id,approved=True).order_by(Review.created_at.desc()).all();meta=v21_meta(p);included=v21_json(meta.included_json,[]);faq=v21_json(meta.faq_json,[]);plans=sorted([x for x in p.plans if x.active],key=lambda x:x.sort_order);saved=current_user.is_authenticated and Wishlist.query.filter_by(user_id=current_user.id,product_id=p.id).first() is not None
+    return render_template("v21_product.html",product=p,meta=meta,included=included,faq=faq,plans=plans,reviews=reviews,saved=saved,recent=v21_recent())
+
+def v21_account():
+    subs=Subscription.query.filter_by(user_id=current_user.id).order_by(Subscription.expires_at.asc()).all();changed=False
+    for s in subs:
+        old=s.active;s.active=(s.expires_at>datetime.utcnow())
+        if old and not s.active:v21_notify(current_user.id,"Subscription expired",f"{s.product.name} has expired.","subscription");changed=True
+        elif s.active and (s.expires_at-datetime.utcnow()).days<=7 and old:
+            exists=V21Notification.query.filter_by(user_id=current_user.id,kind="expiration").filter(V21Notification.body.like(f"%{s.product.name}%")).first()
+            if not exists:v21_notify(current_user.id,"Subscription expiring soon",f"{s.product.name} expires on {s.expires_at.strftime('%d.%m.%Y')}.","expiration");changed=True
+    if changed:db.session.commit()
+    orders=Order.query.filter_by(user_id=current_user.id).order_by(Order.created_at.desc()).all()
+    for o in orders[:20]:
+        label = o.plan.product.name if o.plan else (o.bundle.name if o.bundle else "Order")
+        if not V21Notification.query.filter_by(user_id=current_user.id,kind="order").filter(V21Notification.body.like(f"%{public_order_ref(o)}%")).first():
+            v21_notify(current_user.id,"Order update",f"{public_order_ref(o)} · {label} · {o.status}","order")
+        if o.delivery and not V21Notification.query.filter_by(user_id=current_user.id,kind="delivery").filter(V21Notification.body.like(f"%{public_order_ref(o)}%")).first():
+            v21_notify(current_user.id,"Delivery ready",f"{public_order_ref(o)} is ready in your account.","delivery")
+    active_deals=V21Deal.query.filter_by(active=True).count()
+    if active_deals and not V21Notification.query.filter_by(user_id=current_user.id,kind="deal").first():
+        v21_notify(current_user.id,"New deals available",f"There are {active_deals} active deals to explore.","deal")
+    db.session.commit()
+    wishlist=Wishlist.query.filter_by(user_id=current_user.id).all();tickets=V21Ticket.query.filter_by(user_id=current_user.id).order_by(V21Ticket.updated_at.desc()).limit(5).all();notes=V21Notification.query.filter_by(user_id=current_user.id).order_by(V21Notification.created_at.desc()).limit(6).all();points=sum(x.points for x in LoyaltyPoint.query.filter_by(user_id=current_user.id).all())
+    return render_template("v21_account.html",subs=subs,orders=orders,wishlist=wishlist,tickets=tickets,notifications=notes,points=points,recent=v21_recent())
+
+def v21_wishlist_page():
+    items=Wishlist.query.filter_by(user_id=current_user.id).order_by(Wishlist.id.desc()).all();return render_template("v21_wishlist.html",items=items)
+
+app.view_functions["index"]=v21_index
+app.view_functions["product"]=v21_product
+app.view_functions["account"]=login_required(v21_account)
+app.view_functions["wishlist_page"]=login_required(v21_wishlist_page)
+
+with app.app_context():
+    db.create_all()
+    v21_payment_methods()
+    # Sensible metadata defaults for the current catalog. Gemini keeps the requested 18-month / 5 TB offer copy.
+    for _p in Product.query.all():
+        _m = V21ProductMeta.query.filter_by(product_id=_p.id).first()
+        if not _m:
+            _m = V21ProductMeta(product_id=_p.id)
+            db.session.add(_m)
+        if not _m.keywords:
+            _m.keywords = f"{_p.name} {_p.category.name}"
+        if _p.slug == "gemini":
+            _m.product_type = "AI subscription"
+            _m.region = "Worldwide"
+            _m.receive_type = "Personal Account"
+            _m.delivery = "Activated directly on your personal Google account"
+            _m.guarantee = "Support included"
+            _m.included_json = json.dumps(["18 months of Gemini Premium", "5 TB Google Drive storage", "Activated directly on your personal Google account"], ensure_ascii=False)
+            _m.desc_i18n = json.dumps({"en":"18 months of Gemini Premium + 5 TB Google Drive storage, activated directly on your personal Google account."}, ensure_ascii=False)
+            _m.keywords = "gemini google ai ai pro premium google drive 5tb"
+    db.session.commit()
