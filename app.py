@@ -6,6 +6,8 @@ import json
 import threading
 import time
 import secrets
+import hashlib
+import base64
 import requests
 
 from dotenv import load_dotenv
@@ -353,6 +355,14 @@ def product_logo(product):
         return mapped + "?v=20260910"
     return (product.image_url or "").strip()
 
+
+def public_order_ref(order):
+    """Stable non-sequential customer-facing order reference."""
+    secret = str(app.config.get("SECRET_KEY", "veyra"))
+    digest = hashlib.sha256(f"{secret}:{order.id}".encode("utf-8")).digest()
+    token = base64.b32encode(digest).decode("ascii").rstrip("=")[:10]
+    return f"VYR-{token}"
+
 @app.before_request
 def set_language():
     lang = request.args.get("lang")
@@ -382,7 +392,24 @@ def inject_i18n():
         args = request.args.to_dict(flat=True)
         args["lang"] = code
         return request.path + ("?" + urlencode(args) if args else "") + ("#" + request.path.split("#",1)[1] if "#" in request.path else "")
-    return {"lang": lang, "languages": [("en","English"),("de","Deutsch"),("fr","Français"),("sq","Shqip")], "tr": tr, "translations": TRANSLATIONS, "switch_url": switch_url, "store_name": settings.get("store_name","Veyra"), "theme": theme, "announcement": settings.get("announcement",""), "hero_title": hero_title, "store_logo_url": settings.get("store_logo_url",""), "payment_provider": settings.get("payment_provider","whatsapp"), "product_logo": product_logo}
+    return {"public_order_ref": public_order_ref, "lang": lang, "languages": [("en","English"),("de","Deutsch"),("fr","Français"),("sq","Shqip")], "tr": tr, "translations": TRANSLATIONS, "switch_url": switch_url, "store_name": settings.get("store_name","Veyra"), "theme": theme, "announcement": settings.get("announcement",""), "hero_title": hero_title, "store_logo_url": settings.get("store_logo_url",""), "payment_provider": settings.get("payment_provider","whatsapp"), "product_logo": product_logo}
+
+REFERENCE_DESCRIPTIONS = {
+    "spotify": "Individual access with account upgrade. Family Share Individual is also available. Choose the duration that fits you.",
+    "disney-plus": "Shared account with 1 profile. Available in different durations for simple access to Disney+.",
+    "netflix": "4K Ultra account with 1 shared profile and PIN protection. Available for 1, 2 or 3 months.",
+    "gemini": "18-month activation linked to your personal account. Long-term access without a separate shared profile.",
+    "crunchyroll-mega-fan": "Mega Fan account upgrade for your personal account, with shared-profile and PIN-protection options depending on the plan.",
+    "dazn": "DAZN Ultimate access with country-specific options shown by plan. Available for England, Spain, Italy, Germany and France.",
+    "amazon-prime": "Amazon Prime account access with 3, 6 or 12-month options.",
+    "quillbot": "Private QuillBot account for individual use. Available as a simple long-term option.",
+    "deezer": "Deezer account access with a 12-month option.",
+    "ipvanish": "IPVanish VPN account with 12-month access for private and secure browsing.",
+    "expressvpn": "ExpressVPN account with 12-month access for private browsing and secure connections.",
+    "nordvpn": "NordVPN account with 12-month access for private browsing and secure connections.",
+    "windows": "Windows Pro product keys. Choose between Windows 11 Pro and Windows 10 Pro keys.",
+    "microsoft-365": "Microsoft 365 Pro Plus key with a 1-year option. Includes the familiar Office applications for productivity.",
+}
 
 def seed():
     cats = [
@@ -418,11 +445,22 @@ def seed():
     for name, slug, cat_name in defaults:
         if not Product.query.filter_by(slug=slug).first():
             cat = Category.query.filter_by(name=cat_name).first()
-            p = Product(name=name, slug=slug, category=cat, description=f"{name} subscription.")
+            p = Product(name=name, slug=slug, category=cat, description=REFERENCE_DESCRIPTIONS.get(slug, f"{name} subscription."))
             db.session.add(p)
             db.session.flush()
             for months, label in [(1,"1 Month"),(3,"3 Months"),(6,"6 Months"),(12,"12 Months")]:
                 db.session.add(Plan(product_id=p.id, name=label, months=months, price=0))
+    # Use the supplied reference image only as a content reference for descriptions.
+    # Never use the uploaded image as a storefront/product image.
+    desc_changed = False
+    for _slug, _desc in REFERENCE_DESCRIPTIONS.items():
+        _p = Product.query.filter_by(slug=_slug).first()
+        if _p and (not (_p.description or '').strip() or (_p.description or '').strip() == f"{_p.name} subscription."):
+            _p.description = _desc
+            desc_changed = True
+    if desc_changed:
+        db.session.commit()
+
     # Give seeded products polished brand logos automatically; admin-uploaded images always win.
     changed = False
     for _p in Product.query.all():
@@ -717,7 +755,7 @@ def create_telegram_order(user, plan):
     o = Order(user_id=user.id, plan_id=plan.id, sale_price=selling_price, cost_price=cost, profit=selling_price-cost)
     db.session.add(o)
     db.session.flush()
-    audit_note = f"Order #{o.id} created from Telegram for @{user.username} — {plan.product.name} / {plan.name}"
+    audit_note = f"{public_order_ref(o)} created from Telegram for @{user.username} — {plan.product.name} / {plan.name}"
     app.logger.info(audit_note)
     db.session.commit()
     notify_admins(customer_order_notification(o), "new_order", o)
@@ -734,14 +772,14 @@ def customer_subscriptions_text(user_id):
 
 def customer_order_text(o):
     item=f"{o.plan.product.name} — {o.plan.name}" if o.plan else (o.bundle.name if o.bundle else "Order")
-    text=f"🧾 Order #{o.id}\n📦 {item}\n💶 €{o.sale_price:.2f}\n📌 {o.status}"
+    text=f"🧾 {public_order_ref(o)}\n📦 {item}\n💶 €{o.sale_price:.2f}\n📌 {o.status}"
     if o.delivery:
         text += f"\n\n📦 Delivery\n{o.delivery.content}"
     return text
 
 def telegram_order_text(o):
     item = f"{o.plan.product.name} — {o.plan.name}" if o.plan else o.bundle.name
-    return (f"🧾 Order #{o.id}\n"
+    return (f"🧾 {public_order_ref(o)}\n"
             f"👤 @{o.user.username}\n"
             f"📦 {item}\n"
             f"💶 €{o.sale_price:.2f}\n"
@@ -807,11 +845,11 @@ def telegram_handle_update(update):
                 else:
                     o = create_telegram_order(customer, plan)
                     number = re.sub(r"\D", "", os.getenv("WHATSAPP_NUMBER", "+14242165211"))
-                    wa_text = f"Hello, I want to complete Veyra order #{o.id}. Product: {plan.product.name} - {plan.name}. Username: {customer.username}."
+                    wa_text = f"Hello, I want to complete Veyra order {public_order_ref(o)}. Product: {plan.product.name} - {plan.name}. Username: {customer.username}."
                     wa = f"https://wa.me/{number}?text={quote(wa_text)}" if number else None
                     kb = {"inline_keyboard": [[{"text": "💬 Complete order on WhatsApp", "url": wa}],[{"text": "🛍 More products", "callback_data": "cust_products"}]]} if wa else {"inline_keyboard": [[{"text": "🛍 More products", "callback_data": "cust_products"}]]}
                     price = plan.sale_price if plan.sale_price is not None else plan.price
-                    send_telegram_chat(chat_id, f"✅ Order #{o.id} created!\n\n📦 {plan.product.name} — {plan.name}\n💰 €{price:.2f}\n🟡 Status: Pending\n\nComplete your order through WhatsApp:", kb)
+                    send_telegram_chat(chat_id, f"✅ Order {public_order_ref(o)} created!\n\n📦 {plan.product.name} — {plan.name}\n💰 €{price:.2f}\n🟡 Status: Pending\n\nComplete your order through WhatsApp:", kb)
             telegram_api("answerCallbackQuery", {"callback_query_id": cq.get("id"), "text": "Order created"})
             return
         if data == "cust_products":
@@ -914,10 +952,10 @@ def telegram_handle_update(update):
                                 sent = send_telegram_chat(o.user.telegram_id, f"✅ Veyra delivery for order #{o.id}\n\n{draft['content']}\n\nYour order is now completed.")
                                 d.sent_to_customer_telegram = sent
                                 db.session.commit()
-                            audit_note = f"Order #{o.id} delivered via Telegram by {uid}; previous status {previous}"
+                            audit_note = f"{public_order_ref(o)} delivered via Telegram by {uid}; previous status {previous}"
                             app.logger.info(audit_note)
-                            send_telegram_chat(chat_id, f"✅ Delivered and confirmed on website.\nOrder #{o.id} is now COMPLETED." + ("\n📨 Sent to customer's Telegram." if sent else "\nℹ️ Customer Telegram is not linked, so delivery is stored on the website only."))
-                            notify_admins(f"📦 Delivery confirmed from Telegram\nOrder #{o.id}\n@{o.user.username}\n€{o.sale_price:.2f}")
+                            send_telegram_chat(chat_id, f"✅ Delivered and confirmed on website.\nOrder {public_order_ref(o)} is now COMPLETED." + ("\n📨 Sent to customer's Telegram." if sent else "\nℹ️ Customer Telegram is not linked, so delivery is stored on the website only."))
+                            notify_admins(f"📦 Delivery confirmed from Telegram\nOrder {public_order_ref(o)}\n@{o.user.username}\n€{o.sale_price:.2f}")
                 TELEGRAM_DELIVERY_DRAFTS.pop(uid, None)
         elif data == "delivery_cancel":
             TELEGRAM_DELIVERY_DRAFTS.pop(uid, None)
@@ -1212,7 +1250,7 @@ def notify_admins(message, event="new_order", order=None):
         if event == "new_order" and order is not None:
             number = re.sub(r"\D", "", os.getenv("WHATSAPP_NUMBER", "+14242165211"))
             item = f"{order.plan.product.name} — {order.plan.name}" if order.plan else (order.bundle.name if order.bundle else "Order")
-            wa_text = f"Hello, I want to complete Veyra order #{order.id}. Product: {item}. Customer: @{order.user.username}."
+            wa_text = f"Hello, I want to complete Veyra order {public_order_ref(order)}. Product: {item}. Customer: @{order.user.username}."
             wa = f"https://wa.me/{number}?text={quote(wa_text)}" if number else None
             rows = [[{"text": "📦 Deliver", "callback_data": f"deliver:{order.id}"}]]
             if wa:
@@ -1371,10 +1409,10 @@ def order(plan_id):
     if coupon:
         usage = CouponUsage.query.filter_by(coupon_id=coupon.id, user_id=current_user.id).first()
         if usage: usage.order_id = o.id
-    audit("New order", f"Order #{o.id} — {plan.product.name} / {plan.name} — €{final_price:.2f}"); db.session.commit()
+    audit("New order", f"{public_order_ref(o)} — {plan.product.name} / {plan.name} — €{final_price:.2f}"); db.session.commit()
     notify_admins(customer_order_notification(o), "new_order", o)
     number = os.getenv("WHATSAPP_NUMBER","" )
-    msg = f"Hello, I want to order {plan.product.name} - {plan.name}. Order #{o.id}. Username: {current_user.username}"
+    msg = f"Hello, I want to order {plan.product.name} - {plan.name}. Order {public_order_ref(o)}. Username: {current_user.username}"
     wa = f"https://wa.me/{number}?text={quote(msg)}" if number else "#"
     return render_template("order.html", order=o, wa=wa)
 
@@ -1406,7 +1444,7 @@ def start_payment(order_id):
             app.logger.warning("Stripe checkout error: %s", data)
             flash("Unable to start Stripe checkout.")
             return redirect(url_for("order_payment_unavailable", order_id=o.id))
-        audit("Stripe checkout started", f"Order #{o.id}")
+        audit("Stripe checkout started", f"{public_order_ref(o)}")
         db.session.commit()
         return redirect(data["url"])
     except Exception as exc:
@@ -1434,8 +1472,8 @@ def payment_success():
     o=db.session.get(Order,oid)
     if not o or o.user_id != current_user.id: return ("Payment order not found",404)
     if data.get("payment_status") == "paid":
-        o.status="processing"; audit("Payment verified",f"Order #{o.id} paid via Stripe"); db.session.commit()
-        notify_admins(f"💳 Payment confirmed for order #{o.id}\n@{o.user.username}\n€{o.sale_price:.2f}", "payment")
+        o.status="processing"; audit("Payment verified",f"{public_order_ref(o)} paid via Stripe"); db.session.commit()
+        notify_admins(f"💳 Payment confirmed for order {public_order_ref(o)}\n@{o.user.username}\n€{o.sale_price:.2f}", "payment")
         flash("Payment confirmed. Your order is now being processed.")
     return redirect(url_for("account"))
 
@@ -1472,11 +1510,11 @@ def bundle_order(bundle_id):
     if coupon:
         usage = CouponUsage.query.filter_by(coupon_id=coupon.id, user_id=current_user.id).first()
         if usage: usage.order_id = o.id
-    audit("New bundle order", f"Order #{o.id} — {bundle.name} — €{final_price:.2f}"); db.session.commit()
+    audit("New bundle order", f"{public_order_ref(o)} — {bundle.name} — €{final_price:.2f}"); db.session.commit()
     notify_admins(customer_order_notification(o), "new_order", o)
     number = os.getenv("WHATSAPP_NUMBER","" )
     item_names = " + ".join(f"{i.plan.product.name} ({i.plan.name})" for i in bundle.items)
-    msg = f"Hello, I want to order bundle: {bundle.name}. Items: {item_names}. Order #{o.id}. Username: {current_user.username}"
+    msg = f"Hello, I want to order bundle: {bundle.name}. Items: {item_names}. Order {public_order_ref(o)}. Username: {current_user.username}"
     wa = f"https://wa.me/{number}?text={quote(msg)}" if number else "#"
     return render_template("order.html", order=o, wa=wa)
 
@@ -1627,13 +1665,13 @@ def complete_order_record(o, source="admin"):
     points_per_eur = loyalty_setting("loyalty_points_per_eur", 1)
     earned = int(max(0, round((o.sale_price or 0) * points_per_eur)))
     if earned:
-        db.session.add(LoyaltyPoint(user_id=o.user_id, points=earned, reason=f"Purchase reward — order #{o.id}"))
+        db.session.add(LoyaltyPoint(user_id=o.user_id, points=earned, reason=f"Purchase reward — order {public_order_ref(o)}"))
 
     ref = Referral.query.filter_by(referred_id=o.user_id, rewarded=False).first()
     if ref and ref.referrer_id != o.user_id:
         reward = int(loyalty_setting("referral_reward_points", os.getenv("REFERRAL_REWARD_POINTS", "100")))
-        db.session.add(LoyaltyPoint(user_id=ref.referrer_id, points=reward, reason=f"Referral reward — order #{o.id}"))
-        db.session.add(LoyaltyPoint(user_id=o.user_id, points=reward, reason=f"Referral reward — first purchase #{o.id}"))
+        db.session.add(LoyaltyPoint(user_id=ref.referrer_id, points=reward, reason=f"Referral reward — order {public_order_ref(o)}"))
+        db.session.add(LoyaltyPoint(user_id=o.user_id, points=reward, reason=f"Referral reward — first purchase {public_order_ref(o)}"))
         ref.reward_points = reward
         ref.rewarded = True
     return True
@@ -1667,7 +1705,7 @@ def admin_order_deliver(order_id):
         db.session.add(OrderDelivery(order_id=o.id, content=content, delivered_by_telegram_id=None, sent_to_customer_telegram=False))
     previous=o.status
     complete_order_record(o, source=f"web:{current_user.username}")
-    audit("Order delivered", f"Order #{o.id}: {previous} → completed")
+    audit("Order delivered", f"{public_order_ref(o)}: {previous} → completed")
     db.session.commit()
     flash("Delivery saved and order completed.")
     if o.user.telegram_id:
@@ -1684,7 +1722,7 @@ def admin_order_resend_telegram(order_id):
     if not o.user.telegram_id:
         flash("Customer has no Telegram linked.")
         return redirect(url_for("admin_order_detail", order_id=order_id))
-    sent=send_telegram_chat(o.user.telegram_id, f"📦 Veyra delivery for order #{o.id}\n\n{o.delivery.content}\n\nYour order is completed.")
+    sent=send_telegram_chat(o.user.telegram_id, f"📦 Veyra delivery for order {public_order_ref(o)}\n\n{o.delivery.content}\n\nYour order is completed.")
     o.delivery.sent_to_customer_telegram=sent
     db.session.commit()
     flash("Delivery resent to customer Telegram." if sent else "Telegram delivery failed.")
@@ -1704,6 +1742,42 @@ def admin_customer_detail(user_id):
     reviews=Review.query.filter_by(user_id=u.id).order_by(Review.created_at.desc()).all()
     return render_template("admin_customer.html", customer=u, orders=orders, subscriptions=subs, points=points, wishlist_items=wishlist_items, referrals=referrals, reviews=reviews)
 
+@app.route("/admin/orders/reset", methods=["POST"])
+@login_required
+def admin_orders_reset():
+    """Reset transactional/test purchase data while preserving the catalog and customer accounts."""
+    if not admin_required(): return ("Forbidden", 403)
+    # Remove dependent transactional records first so this works on PostgreSQL and SQLite.
+    delivery_count = OrderDelivery.query.delete(synchronize_session=False)
+    subscription_count = Subscription.query.delete(synchronize_session=False)
+    coupon_usage_count = CouponUsage.query.delete(synchronize_session=False)
+    order_count = Order.query.delete(synchronize_session=False)
+    # Test purchase rewards are transactional too; keep customers/products/settings intact.
+    loyalty_count = LoyaltyPoint.query.delete(synchronize_session=False)
+    Coupon.query.update({Coupon.used_count: 0}, synchronize_session=False)
+    db.session.commit()
+    audit("Purchase reset", f"Deleted {order_count} orders, {delivery_count} deliveries, {subscription_count} subscriptions, {coupon_usage_count} coupon uses and {loyalty_count} loyalty entries")
+    db.session.commit()
+    flash(f"Purchase test data reset: {order_count} orders removed. Products, plans and customers were preserved.")
+    return redirect(url_for("admin") + "#orders")
+
+@app.route("/admin/order/<int:order_id>/delete", methods=["POST"])
+@login_required
+def admin_order_delete(order_id):
+    if not admin_required(): return ("Forbidden", 403)
+    o = db.session.get(Order, order_id)
+    if not o: return ("Not found", 404)
+    public_label = f"{public_order_ref(o)}"
+    OrderDelivery.query.filter_by(order_id=o.id).delete(synchronize_session=False)
+    Subscription.query.filter_by(order_id=o.id).delete(synchronize_session=False)
+    CouponUsage.query.filter_by(order_id=o.id).delete(synchronize_session=False)
+    db.session.delete(o)
+    db.session.commit()
+    audit("Order deleted", public_label)
+    db.session.commit()
+    flash(f"{public_label} was permanently removed.")
+    return redirect(url_for("admin") + "#orders")
+
 @app.route("/admin/order/<int:order_id>/<status>", methods=["POST"])
 @login_required
 def order_status(order_id,status):
@@ -1716,10 +1790,10 @@ def order_status(order_id,status):
         complete_order_record(o, source="admin")
     else:
         o.status = status
-    audit("Order status", f"Order #{o.id}: {previous} → {status}")
+    audit("Order status", f"{public_order_ref(o)}: {previous} → {status}")
     db.session.commit()
     if status == "completed" and previous != "completed":
-        notify_admins(f"✅ Order #{o.id} completed\n@{o.user.username}\n€{o.sale_price:.2f}\nProfit: €{o.profit:.2f}")
+        notify_admins(f"✅ {public_order_ref(o)} completed\n@{o.user.username}\n€{o.sale_price:.2f}\nProfit: €{o.profit:.2f}")
     return redirect(url_for("admin"))
 
 
@@ -2006,22 +2080,42 @@ def admin_product_delete(product_id):
     if not admin_required(): return ("Forbidden",403)
     p = db.session.get(Product, product_id)
     if not p: return ("Not found",404)
+
+    # This is a true permanent delete. Visibility is handled separately by Hide/Show.
+    # Remove every dependent record first so PostgreSQL/SQLite cannot silently force an archive.
     plan_ids = [x.id for x in p.plans]
-    has_history = Order.query.filter(Order.plan_id.in_(plan_ids)).first() if plan_ids else None
-    has_subs = Subscription.query.filter_by(product_id=p.id).first()
-    has_reviews = Review.query.filter_by(product_id=p.id).first()
-    has_wishlist = Wishlist.query.filter_by(product_id=p.id).first()
-    has_bundle = BundleItem.query.filter(BundleItem.plan_id.in_(plan_ids)).first() if plan_ids else None
-    if has_history or has_subs or has_reviews or has_wishlist or has_bundle:
-        p.active = False
-        for plan in p.plans: plan.active = False
-        db.session.commit()
-        flash(f"'{p.name}' has sales/history, so it was archived instead of deleted.")
-        return redirect(url_for("admin"))
+    order_ids = [x.id for x in Order.query.filter(Order.plan_id.in_(plan_ids)).all()] if plan_ids else []
+    if order_ids:
+        OrderDelivery.query.filter(OrderDelivery.order_id.in_(order_ids)).delete(synchronize_session=False)
+        Subscription.query.filter(Subscription.order_id.in_(order_ids)).delete(synchronize_session=False)
+        CouponUsage.query.filter(CouponUsage.order_id.in_(order_ids)).delete(synchronize_session=False)
+        Order.query.filter(Order.id.in_(order_ids)).delete(synchronize_session=False)
+
+    if plan_ids:
+        # Remove the product's plans from bundles. Empty bundles are deleted; bundles with
+        # their own order history are kept but disabled so their historical records remain valid.
+        bundle_ids = [x.bundle_id for x in BundleItem.query.filter(BundleItem.plan_id.in_(plan_ids)).all()]
+        BundleItem.query.filter(BundleItem.plan_id.in_(plan_ids)).delete(synchronize_session=False)
+        for bid in bundle_ids:
+            b = db.session.get(Bundle, bid)
+            if b and not BundleItem.query.filter_by(bundle_id=bid).first():
+                if not Order.query.filter_by(bundle_id=bid).first():
+                    db.session.delete(b)
+                else:
+                    b.active = False
+
+        Subscription.query.filter(Subscription.product_id == p.id).delete(synchronize_session=False)
+        db.session.execute(db.delete(Plan).where(Plan.id.in_(plan_ids)))
+
+    Review.query.filter_by(product_id=p.id).delete(synchronize_session=False)
+    Wishlist.query.filter_by(product_id=p.id).delete(synchronize_session=False)
+    name = p.name
     db.session.delete(p)
     db.session.commit()
-    flash("Product deleted.")
-    return redirect(url_for("admin"))
+    audit("Product permanently deleted", f"{name} and its plans/dependent purchase records")
+    db.session.commit()
+    flash(f"'{name}' was permanently deleted. It is no longer hidden/archived.")
+    return redirect(url_for("admin") + "#products")
 
 @app.route("/admin/plan/new", methods=["POST"])
 @login_required
