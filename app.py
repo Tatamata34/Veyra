@@ -78,6 +78,8 @@ class Product(db.Model):
     category_id = db.Column(db.Integer, db.ForeignKey("category.id"), nullable=False)
     active = db.Column(db.Boolean, default=True)
     featured = db.Column(db.Boolean, default=False)
+    sort_order = db.Column(db.Integer, nullable=False, default=0)
+    card_label = db.Column(db.String(140), nullable=False, default="")
     price_label = db.Column(db.String(60), nullable=False, default="month")
     category = db.relationship("Category", backref="products")
     plans = db.relationship("Plan", backref="product", cascade="all, delete-orphan")
@@ -91,6 +93,7 @@ class Plan(db.Model):
     sale_price = db.Column(db.Float, nullable=True)
     cost_price = db.Column(db.Float, nullable=False, default=0.0)
     active = db.Column(db.Boolean, default=True)
+    sort_order = db.Column(db.Integer, nullable=False, default=0)
 
 
 class Coupon(db.Model):
@@ -293,6 +296,15 @@ for _lang, _vals in {
 
 for _l in ("de", "fr", "sq"):
     TRANSLATIONS[_l].update({"Customer account": TRANSLATIONS[_l].get("Account","Account"),"Started":"Gestartet am" if _l=="de" else ("Commencé le" if _l=="fr" else "Filluar më"),"No approved reviews yet.":"Noch keine freigegebenen Bewertungen." if _l=="de" else ("Aucun avis approuvé pour le moment." if _l=="fr" else "Ende nuk ka vlerësime të aprovuara."),"Back to products":"Zurück zu den Produkten" if _l=="de" else ("Retour aux produits" if _l=="fr" else "Kthehu te produktet"),"Add / Remove Wishlist":"Zur Wunschliste hinzufügen / entfernen" if _l=="de" else ("Ajouter / retirer des favoris" if _l=="fr" else "Shto / hiq nga dëshirat"),"Full access for":"Voller Zugriff für" if _l=="de" else ("Accès complet pendant" if _l=="fr" else "Qasje e plotë për"),"Protected admin area":"Geschützter Admin-Bereich" if _l=="de" else ("Espace admin protégé" if _l=="fr" else "Zona e mbrojtur e adminit"),"Code":"Code" if _l in ("de","fr") else "Kodi","Discount":"Rabatt" if _l=="de" else ("Réduction" if _l=="fr" else "Zbritja"),"Uses":"Nutzungen" if _l=="de" else ("Utilisations" if _l=="fr" else "Përdorime"),"Expires":"Läuft ab" if _l=="de" else ("Expire" if _l=="fr" else "Skadon"),"Create account":"Konto erstellen" if _l=="de" else ("Créer un compte" if _l=="fr" else "Krijo llogari"),"Open WhatsApp":"WhatsApp öffnen" if _l=="de" else ("Ouvrir WhatsApp" if _l=="fr" else "Hap WhatsApp")})
+
+# Admin UX vocabulary.
+for _lang, _vals in {
+    "en": {"Storefront text":"Storefront text","Display order":"Display order","Drag to reorder":"Drag to reorder","Full description":"Full description","Save this change":"Save this change"},
+    "de": {"Storefront text":"Shop-Text","Display order":"Anzeigereihenfolge","Drag to reorder":"Zum Sortieren ziehen","Full description":"Vollständige Beschreibung","Save this change":"Änderung speichern"},
+    "fr": {"Storefront text":"Texte boutique","Display order":"Ordre d'affichage","Drag to reorder":"Glisser pour réorganiser","Full description":"Description complète","Save this change":"Enregistrer"},
+    "sq": {"Storefront text":"Teksti në pamjen e dyqanit","Display order":"Renditja e shfaqjes","Drag to reorder":"Tërhiq për ta renditur","Full description":"Përshkrimi i plotë","Save this change":"Ruaj ndryshimin"}
+}.items():
+    TRANSLATIONS[_lang].update(_vals)
 
 # Category labels are translated with the rest of the storefront.
 for _lang, _vals in {
@@ -673,7 +685,7 @@ def customer_orders_keyboard(user_id):
     return {"inline_keyboard": rows} if rows else None
 
 def customer_products_keyboard():
-    products = Product.query.filter_by(active=True).order_by(Product.featured.desc(), Product.name).limit(30).all()
+    products = Product.query.filter_by(active=True).order_by(Product.sort_order.asc(), Product.featured.desc(), Product.name).limit(30).all()
     rows = []
     for p in products:
         plans = [x for x in p.plans if x.active]
@@ -686,7 +698,7 @@ def customer_plan_keyboard(product_id):
     if not p or not p.active:
         return None
     rows = []
-    for plan in sorted([x for x in p.plans if x.active], key=lambda x: (x.months, x.id)):
+    for plan in sorted([x for x in p.plans if x.active], key=lambda x: (x.sort_order, x.months, x.id)):
         price = plan.sale_price if plan.sale_price is not None else plan.price
         rows.append([{"text": f"📅 {plan.name} — €{price:.2f}", "callback_data": f"buyplan:{plan.id}"}])
     rows.append([{"text": "⬅️ Products", "callback_data": "cust_products"}])
@@ -804,7 +816,7 @@ def telegram_handle_update(update):
             return
         if data == "cust_products":
             with app.app_context():
-                products=Product.query.filter_by(active=True).order_by(Product.featured.desc(), Product.name).limit(30).all()
+                products=Product.query.filter_by(active=True).order_by(Product.sort_order.asc(), Product.featured.desc(), Product.name).limit(30).all()
                 lines=["🛍 Veyra Products", ""]
                 for p in products:
                     plans=[x for x in p.plans if x.active]
@@ -816,7 +828,7 @@ def telegram_handle_update(update):
             return
         if data == "cust_deals":
             with app.app_context():
-                deals=Product.query.join(Plan).filter(Product.active==True, Plan.active==True, Plan.sale_price.isnot(None)).order_by(Product.name).all()
+                deals=Product.query.join(Plan).filter(Product.active==True, Plan.active==True, Plan.sale_price.isnot(None)).order_by(Product.sort_order.asc(), Product.featured.desc(), Product.name).all()
                 lines=["🔥 Veyra Deals", ""]
                 seen=set()
                 for p in deals:
@@ -1047,7 +1059,7 @@ def telegram_handle_update(update):
 
         if command == "/deals" and not telegram_authorized(uid):
             with app.app_context():
-                deals = Product.query.join(Plan).filter(Product.active==True, Plan.active==True, Plan.sale_price.isnot(None)).order_by(Product.name).all()
+                deals = Product.query.join(Plan).filter(Product.active==True, Plan.active==True, Plan.sale_price.isnot(None)).order_by(Product.sort_order.asc(), Product.featured.desc(), Product.name).all()
                 lines=["🔥 Veyra deals", ""]
                 seen=set()
                 for p in deals:
@@ -1092,7 +1104,7 @@ def telegram_handle_update(update):
             return
         if command == "/products" and telegram_authorized(uid):
             with app.app_context():
-                products=Product.query.filter_by(active=True).order_by(Product.name).limit(30).all()
+                products=Product.query.filter_by(active=True).order_by(Product.sort_order.asc(), Product.featured.desc(), Product.name).limit(30).all()
                 text="🛍 Active products\n\n"+"\n".join(f"• {p.name} — {len([x for x in p.plans if x.active])} active plans" for p in products) if products else "📭 No active products."
                 send_telegram_chat(chat_id,text)
             return
@@ -1177,7 +1189,14 @@ with app.app_context():
         cols = {c["name"] for c in inspect(db.engine).get_columns("product")}
         if "price_label" not in cols:
             db.session.execute(db.text("ALTER TABLE product ADD COLUMN price_label VARCHAR(60) DEFAULT 'month'"))
-            db.session.commit()
+        if "sort_order" not in cols:
+            db.session.execute(db.text("ALTER TABLE product ADD COLUMN sort_order INTEGER DEFAULT 0"))
+        if "card_label" not in cols:
+            db.session.execute(db.text("ALTER TABLE product ADD COLUMN card_label VARCHAR(140) DEFAULT ''"))
+        plan_cols = {c["name"] for c in inspect(db.engine).get_columns("plan")}
+        if "sort_order" not in plan_cols:
+            db.session.execute(db.text("ALTER TABLE plan ADD COLUMN sort_order INTEGER DEFAULT 0"))
+        db.session.commit()
         configure_telegram_commands()
     except Exception as exc:
         app.logger.warning("Telegram command setup skipped: %s", exc)
@@ -1211,7 +1230,7 @@ def audit(action, details=""):
 
 @app.route("/")
 def index():
-    products = Product.query.filter_by(active=True).order_by(Product.featured.desc(), Product.name).all()
+    products = Product.query.filter_by(active=True).order_by(Product.sort_order.asc(), Product.featured.desc(), Product.name).all()
     categories = Category.query.order_by(Category.name).all()
     bundles = Bundle.query.filter_by(active=True).order_by(Bundle.featured.desc(), Bundle.name).all()
     return render_template("index.html", products=products, categories=categories, bundles=bundles)
@@ -1219,7 +1238,7 @@ def index():
 @app.route("/categories")
 def categories():
     categories = Category.query.order_by(Category.name).all()
-    products = Product.query.filter_by(active=True).order_by(Product.featured.desc(), Product.name).all()
+    products = Product.query.filter_by(active=True).order_by(Product.sort_order.asc(), Product.featured.desc(), Product.name).all()
     return render_template("categories.html", categories=categories, products=products)
 
 @app.route("/ref/<code>")
@@ -1553,8 +1572,8 @@ def admin():
     top_products = sorted(product_sales.items(), key=lambda x: x[1], reverse=True)[:8]
     avg_order = round(revenue / len([o for o in orders if o.status != "cancelled"]), 2) if any(o.status != "cancelled" for o in orders) else 0
     return render_template("admin.html",
-        products=Product.query.order_by(Product.name).all(), bundles=Bundle.query.order_by(Bundle.featured.desc(), Bundle.name).all(),
-        plans=Plan.query.join(Product).order_by(Product.name, Plan.months).all(), categories=Category.query.order_by(Category.name).all(),
+        products=Product.query.order_by(Product.sort_order.asc(), Product.featured.desc(), Product.name).all(), bundles=Bundle.query.order_by(Bundle.featured.desc(), Bundle.name).all(),
+        plans=Plan.query.join(Product).order_by(Product.sort_order.asc(), Product.featured.desc(), Product.name, Plan.sort_order.asc(), Plan.months, Plan.id).all(), categories=Category.query.order_by(Category.name).all(),
         orders=orders, users=users,
         subscriptions=Subscription.query.order_by(Subscription.expires_at.desc()).all(),
         reviews=reviews, coupons=coupons, wishlist_count=wishlist_count, points_total=points_total,
@@ -1867,7 +1886,8 @@ def admin_product_new():
                 image_url=uploaded_image or request.form.get("image_url", "").strip(),
                 category_id=category.id,
                 active=request.form.get("active") == "on",
-                featured=request.form.get("featured") == "on")
+                featured=request.form.get("featured") == "on",
+                sort_order=max(0, int(request.form.get("sort_order", 0) or 0)))
     db.session.add(p); db.session.flush()
     months = int(request.form.get("months", 1) or 1)
     price = float(request.form.get("price", 0) or 0)
@@ -1896,12 +1916,15 @@ def admin_product_edit(product_id):
     p.name = name
     p.slug = unique_slug(request.form.get("slug") or name, Product, p.id)
     p.description = request.form.get("description", "").strip()
+    p.card_label = request.form.get("card_label", "").strip()[:140]
     p.price_label = (request.form.get("price_label_custom", "").strip() if request.form.get("price_label_type") == "custom" else request.form.get("price_label_type", p.price_label or "month").strip()) or "month"
     uploaded_image = save_product_image(request.files.get("image_file"))
     p.image_url = uploaded_image or request.form.get("image_url", "").strip()
     p.category_id = category.id
     p.active = request.form.get("active") == "on"
     p.featured = request.form.get("featured") == "on"
+    try: p.sort_order = max(0, int(request.form.get("sort_order", p.sort_order) or p.sort_order))
+    except (TypeError, ValueError): pass
     db.session.commit()
     flash(f"Product '{p.name}' updated.")
     return redirect(url_for("admin"))
@@ -2013,7 +2036,8 @@ def admin_plan_new():
                 price=float(request.form.get("price", 0) or 0),
                 sale_price=float(sale_raw) if sale_raw else None,
                 cost_price=float(request.form.get("cost_price", 0) or 0),
-                active=request.form.get("active") == "on")
+                active=request.form.get("active") == "on",
+                sort_order=max(0, int(request.form.get("sort_order", 0) or 0)))
     db.session.add(plan); db.session.commit()
     flash(f"Plan added to {product.name}.")
     return redirect(url_for("admin"))
@@ -2031,6 +2055,8 @@ def admin_plan_edit(plan_id):
     plan.sale_price = float(sale_raw) if sale_raw else None
     plan.cost_price = float(request.form.get("cost_price", plan.cost_price) or 0)
     plan.active = request.form.get("active") == "on"
+    try: plan.sort_order = max(0, int(request.form.get("sort_order", plan.sort_order) or plan.sort_order))
+    except (TypeError, ValueError): pass
     db.session.commit()
     flash(f"{plan.product.name} — {plan.name} updated.")
     return redirect(url_for("admin"))
@@ -2131,6 +2157,39 @@ def admin_subscription_action(subscription_id, action):
     audit("Subscription action", f"#{sub.id} {action}")
     db.session.commit()
     return redirect(url_for("admin") + "#subscriptions")
+
+@app.route("/admin/reorder/products", methods=["POST"])
+@login_required
+def admin_reorder_products():
+    if not admin_required(): return ("Forbidden", 403)
+    data = request.get_json(silent=True) or {}
+    ids = data.get("ids") or []
+    try: ids = [int(x) for x in ids]
+    except (TypeError, ValueError): return ({"ok": False, "error": "Invalid product order"}, 400)
+    products = {p.id: p for p in Product.query.filter(Product.id.in_(ids)).all()}
+    for pos, pid in enumerate(ids):
+        if pid in products: products[pid].sort_order = pos
+    audit("Products reordered", f"{len(products)} products")
+    db.session.commit()
+    return {"ok": True}
+
+@app.route("/admin/reorder/plans", methods=["POST"])
+@login_required
+def admin_reorder_plans():
+    if not admin_required(): return ("Forbidden", 403)
+    data = request.get_json(silent=True) or {}
+    ids = data.get("ids") or []
+    product_id = data.get("product_id")
+    try:
+        ids = [int(x) for x in ids]
+        product_id = int(product_id)
+    except (TypeError, ValueError): return ({"ok": False, "error": "Invalid plan order"}, 400)
+    plans = {p.id: p for p in Plan.query.filter_by(product_id=product_id).all()}
+    for pos, pid in enumerate(ids):
+        if pid in plans: plans[pid].sort_order = pos
+    audit("Plans reordered", f"product_id={product_id}, {len(plans)} plans")
+    db.session.commit()
+    return {"ok": True}
 
 @app.route("/admin/export/orders.csv")
 @login_required
