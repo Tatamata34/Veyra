@@ -72,7 +72,9 @@
           <label>Name<input name="name" placeholder="Netflix" required></label>
           <label>Category<select name="category_id">{% for c in categories %}<option value="{{c.id}}">{{c.name}}</option>{% endfor %}</select></label>
           <label>Slug<input name="slug" placeholder="netflix"></label>
-          <label>Short description<input name="description" placeholder="Premium digital subscription"></label>
+          <label>{{tr('Storefront text')}}<input name="card_label" placeholder="e.g. 4K · 5 devices · Instant access"></label>
+          <label>{{tr('Display order')}}<input name="sort_order" type="number" min="0" value="0" title="{{tr('Drag to reorder')}}"></label>
+          <label class="wide">{{tr('Full description')}}<textarea name="description" rows="4" placeholder="Write the full product description. You can use multiple lines."></textarea></label>
           <label>Logo / image URL<input name="image_url" placeholder="https://..."></label>
           <label>Upload logo<input type="file" name="image_file" accept="image/png,image/jpeg,image/webp,image/svg+xml"></label>
           <label>Price display<select name="price_label_type" onchange="this.nextElementSibling.hidden=this.value!=='custom'">
@@ -119,9 +121,9 @@
 
       <div class="admin-product-list">
       {% for p in products %}
-        <details class="admin-product" {% if loop.first %}open{% endif %}>
+        <details class="admin-product" data-product-id="{{p.id}}" draggable="true" {% if loop.first %}open{% endif %}>
           <summary>
-            <span class="admin-product-logo">{% if product_logo(p) %}<img src="{{product_logo(p)}}" alt="{{p.name}}">{% else %}<b>{{p.name[:1]}}</b>{% endif %}</span>
+            <span class="drag-handle product-drag" title="{{tr('Drag to reorder')}}">⋮⋮</span><span class="admin-product-logo">{% if product_logo(p) %}<img src="{{product_logo(p)}}" alt="{{p.name}}">{% else %}<b>{{p.name[:1]}}</b>{% endif %}</span>
             <span class="admin-product-title"><b>{{p.name}}</b><small>{{p.category.name}} · {{p.plans|length}} plans</small></span>
             <span class="admin-product-meta"><em class="status {% if p.active %}live{% endif %}">{{tr('Live') if p.active else tr('Hidden')}}</em><span>⌄</span></span>
           </summary>
@@ -135,7 +137,9 @@
               <label>Name<input name="name" value="{{p.name}}" required></label>
               <label>Category<select name="category_id">{% for c in categories %}<option value="{{c.id}}" {% if c.id==p.category_id %}selected{% endif %}>{{c.name}}</option>{% endfor %}</select></label>
               <label>Slug<input name="slug" value="{{p.slug}}"></label>
-              <label>Description<input name="description" value="{{p.description}}"></label>
+              <label>{{tr('Storefront text')}}<input name="card_label" value="{{p.card_label or ""}}" placeholder="e.g. 4K · 5 devices · Instant access"></label>
+              <label>{{tr('Display order')}}<input name="sort_order" type="number" min="0" value="{{p.sort_order}}" title="{{tr('Drag to reorder')}}"></label>
+          <label class="wide">{{tr('Full description')}}<textarea name="description" rows="4" placeholder="Full description — multiple lines supported.">{{p.description}}</textarea></label>
               <label>Logo / image URL<input name="image_url" value="{{p.image_url}}"></label>
               <label>Replace logo<input type="file" name="image_file" accept="image/png,image/jpeg,image/webp,image/svg+xml"></label>
               <label>Price display<select name="price_label_type" onchange="this.nextElementSibling.hidden=this.value!=='custom'">
@@ -155,13 +159,14 @@
             <div class="plans-panel">
               <div class="plans-panel-head"><div><b>{{tr('Plans & pricing')}}</b><small>Public price · sale price · your cost · status</small></div><span>{{p.plans|length}}</span></div>
               {% for plan in p.plans %}
-              <div class="plan-row">
-                <form method="post" action="/admin/plan/{{plan.id}}/edit" class="plan-row-form">
+              <div class="plan-row" data-plan-id="{{plan.id}}" draggable="true">
+                <span class="drag-handle" title="{{tr('Drag to reorder')}}">⋮⋮</span><form method="post" action="/admin/plan/{{plan.id}}/edit" class="plan-row-form">
                   <input name="name" value="{{plan.name}}" title="Plan name">
                   <input name="months" type="number" min="1" value="{{plan.months}}" title="Months">
                   <input name="price" type="number" min="0" step="0.01" value="{{plan.price}}" title="Public price">
                   <input name="sale_price" type="number" min="0" step="0.01" value="{{plan.sale_price if plan.sale_price is not none else ''}}" placeholder="Sale" title="Sale price">
                   <input name="cost_price" type="number" min="0" step="0.01" value="{{plan.cost_price}}" placeholder="Cost" title="Cost">
+                  <input name="sort_order" type="number" min="0" value="{{plan.sort_order}}" title="Display order">
                   <label class="tiny-check"><input type="checkbox" name="active" {% if plan.active %}checked{% endif %}> On</label>
                   <button class="mini save">Save</button>
                 </form>
@@ -178,6 +183,7 @@
                 <input name="price" type="number" min="0" step="0.01" placeholder="Price">
                 <input name="sale_price" type="number" min="0" step="0.01" placeholder="Sale">
                 <input name="cost_price" type="number" min="0" step="0.01" placeholder="Cost">
+                <input name="sort_order" type="number" min="0" value="{{p.plans|length}}" placeholder="Order">
                 <label class="tiny-check"><input type="checkbox" name="active" checked> On</label>
                 <button class="nav-cta">＋ Add plan</button>
               </form>
@@ -239,16 +245,78 @@
   </div>
 </div>
 <script>
-// Keep the admin navigation feeling like a real app: one active section at a time.
-const adminLinks=[...document.querySelectorAll('.admin-v2-side nav a')];
-const adminSections=[...document.querySelectorAll('.admin-anchor')];
-const markAdmin=()=>{let best='dashboard';for(const s of adminSections){if(s.getBoundingClientRect().top<180)best=s.id}adminLinks.forEach(a=>a.classList.toggle('active',a.getAttribute('href')==='#'+best))};window.addEventListener('scroll',markAdmin,{passive:true});markAdmin();
+(() => {
+  const csrf = {{csrf_token|tojson}};
+  const adminRoot = document.querySelector('.admin-v2-main');
+  const sectionFor = el => el.closest('.admin-anchor');
+  const restoreOpen = (section, openProducts, openProductId) => {
+    if (!section) return;
+    if (openProducts?.length) {
+      section.querySelectorAll('details.admin-product[data-product-id]').forEach(d => d.open = openProducts.includes(d.dataset.productId));
+    }
+    if (openProductId) section.querySelector(`details.admin-product[data-product-id="${CSS.escape(openProductId)}"]`)?.setAttribute('open','');
+  };
+  async function ajaxSubmit(form) {
+    const section = sectionFor(form);
+    const sectionId = section?.id;
+    const openProducts = section ? [...section.querySelectorAll('details.admin-product[open]')].map(x=>x.dataset.productId).filter(Boolean) : [];
+    const openProductId = form.closest('details.admin-product')?.dataset.productId || '';
+    const button = form.querySelector('button[type="submit"],button:not([type])');
+    if (button) { button.disabled = true; button.dataset.oldText = button.textContent; button.textContent = 'Saving…'; }
+    try {
+      const res = await fetch(form.action, {method:'POST', body:new FormData(form), headers:{'X-Requested-With':'XMLHttpRequest','X-CSRF-Token':csrf}, credentials:'same-origin'});
+      if (!res.ok) throw new Error('Request failed');
+      const html = await res.text();
+      const doc = new DOMParser().parseFromString(html,'text/html');
+      if (sectionId) {
+        const fresh = doc.getElementById(sectionId);
+        if (fresh && section) { section.replaceWith(fresh); restoreOpen(fresh, openProducts, openProductId); }
+      }
+      updateBulkCount(); initSortables();
+      window.scrollTo({top: window.scrollY, behavior:'instant'});
+    } catch (e) {
+      alert('Could not save this change. Please try again.');
+      if (button) { button.disabled=false; button.textContent=button.dataset.oldText||'Save'; }
+    }
+  }
+  document.addEventListener('submit', e => {
+    const form=e.target;
+    if (!(form instanceof HTMLFormElement) || !form.closest('.admin-v2') || form.dataset.noAjax==='1') return;
+    e.preventDefault();
+    if (form.dataset.confirm && !confirm(form.dataset.confirm)) return;
+    ajaxSubmit(form);
+  });
+  window.updateBulkCount=function(){const n=document.querySelectorAll('.bulk-product-check:checked').length;const el=document.getElementById('bulkSelectedCount');if(el)el.textContent=n+' selected';};
+  window.toggleBulkProducts=function(on){document.querySelectorAll('.bulk-product-check').forEach(x=>x.checked=on);updateBulkCount();};
+  window.confirmBulkPrice=function(){const n=document.querySelectorAll('.bulk-product-check:checked').length;if(!n){alert('Select at least one product.');return false;}return confirm('Apply this price to '+n+' selected product(s)?');};
+  function postJSON(url,data){return fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf,'X-Requested-With':'XMLHttpRequest'},body:JSON.stringify(data),credentials:'same-origin'}).then(r=>{if(!r.ok)throw new Error('reorder failed');return r.json();});}
+  function initSortables(){
+    const list=document.querySelector('.admin-product-list');
+    if(list&&!list.dataset.sortReady){
+      list.dataset.sortReady='1';
+      let dragged=null;
+      list.addEventListener('dragstart',e=>{const d=e.target.closest('details.admin-product');if(!d)return;dragged=d;d.classList.add('is-dragging');e.dataTransfer.effectAllowed='move';});
+      list.addEventListener('dragend',()=>{dragged?.classList.remove('is-dragging');dragged=null;});
+      list.addEventListener('dragover',e=>{if(!dragged)return;const over=e.target.closest('details.admin-product');if(!over||over===dragged)return;e.preventDefault();const r=over.getBoundingClientRect();const before=e.clientY<r.top+r.height/2;list.insertBefore(dragged,before?over:over.nextSibling);});
+      list.addEventListener('drop',async e=>{if(!dragged)return;e.preventDefault();const ids=[...list.querySelectorAll('details.admin-product')].map(x=>x.dataset.productId);try{await postJSON('/admin/reorder/products',{ids});toast('Product order saved');}catch(_){alert('Could not save product order.');}});
+    }
+    document.querySelectorAll('.plans-panel').forEach(panel=>{
+      const rows=[...panel.querySelectorAll('.plan-row[draggable="true"]')]; if(!rows.length || panel.dataset.sortReady)return; panel.dataset.sortReady='1';
+      let dragged=null;
+      panel.addEventListener('dragstart',e=>{const r=e.target.closest('.plan-row[draggable="true"]');if(!r)return;dragged=r;r.classList.add('is-dragging');});
+      panel.addEventListener('dragend',()=>{dragged?.classList.remove('is-dragging');dragged=null;});
+      panel.addEventListener('dragover',e=>{if(!dragged)return;const over=e.target.closest('.plan-row[draggable="true"]');if(!over||over===dragged)return;e.preventDefault();const r=over.getBoundingClientRect();panel.insertBefore(dragged,e.clientY<r.top+r.height/2?over:over.nextSibling);});
+      panel.addEventListener('drop',async e=>{if(!dragged)return;e.preventDefault();const product=panel.closest('details.admin-product');const ids=[...panel.querySelectorAll('.plan-row[draggable="true"]')].map(x=>x.dataset.planId);try{await postJSON('/admin/reorder/plans',{product_id:product?.dataset.productId,ids});toast('Plan order saved');}catch(_){alert('Could not save plan order.');}});
+    });
+  }
+  function toast(msg){let t=document.getElementById('veyraToast');if(!t){t=document.createElement('div');t.id='veyraToast';t.className='veyra-toast';document.body.appendChild(t);}t.textContent=msg;t.classList.add('show');clearTimeout(t._timer);t._timer=setTimeout(()=>t.classList.remove('show'),1400);}
+  window.toast=toast;
+  // Confirm destructive actions without breaking AJAX.
+  document.addEventListener('click',e=>{const b=e.target.closest('button.danger');if(b&&b.closest('form')&&!b.closest('form').dataset.confirm){b.closest('form').dataset.confirm=b.textContent.includes('×')?'Remove this item?':'Remove or archive this item?';}});
+  const adminLinks=[...document.querySelectorAll('.admin-v2-side nav a')];
+  const adminSections=[...document.querySelectorAll('.admin-anchor')];
+  const markAdmin=()=>{let best='dashboard';for(const s of adminSections){if(s.getBoundingClientRect().top<180)best=s.id}adminLinks.forEach(a=>a.classList.toggle('active',a.getAttribute('href')==='#'+best));};
+  window.addEventListener('scroll',markAdmin,{passive:true});markAdmin();updateBulkCount();initSortables();
+})();
 </script>
 {% endblock %}
-
-<script>
-function updateBulkCount(){const n=document.querySelectorAll('.bulk-product-check:checked').length;const el=document.getElementById('bulkSelectedCount');if(el)el.textContent=n+' selected';}
-function toggleBulkProducts(on){document.querySelectorAll('.bulk-product-check').forEach(x=>x.checked=on);updateBulkCount();}
-function confirmBulkPrice(){const n=document.querySelectorAll('.bulk-product-check:checked').length;if(!n){alert('Select at least one product.');return false;}return confirm('Apply this price to '+n+' selected product(s)?');}
-updateBulkCount();
-</script>
