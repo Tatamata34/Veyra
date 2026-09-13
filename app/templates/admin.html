@@ -131,7 +131,7 @@
             <div class="admin-inline-actions">
               <form method="post" action="/admin/product/{{p.id}}/toggle"><button class="mini">{{'Hide' if p.active else 'Show'}}</button></form>
               <form method="post" action="/admin/product/{{p.id}}/duplicate"><button class="mini">Duplicate</button></form>
-              <form method="post" action="/admin/product/{{p.id}}/delete"><button class="mini danger" onclick="return confirm('Remove or archive this product?')">Remove / Archive</button></form>
+              <form method="post" action="/admin/product/{{p.id}}/delete"><button class="mini danger" onclick="return confirm('PERMANENTLY DELETE this product, its plans, and any direct purchase history? Hide only if you want to keep it. This cannot be undone.')">Delete permanently</button></form>
             </div>
             <form class="admin-form-grid compact" method="post" action="/admin/product/{{p.id}}/edit" enctype="multipart/form-data">
               <label>Name<input name="name" value="{{p.name}}" required></label>
@@ -215,7 +215,7 @@
               <label class="check-line"><input type="checkbox" name="active" {% if b.active %}checked{% endif %}> Visible</label><label class="check-line"><input type="checkbox" name="featured" {% if b.featured %}checked{% endif %}> Featured</label>
               <div class="form-submit"><button class="soft-btn">Save bundle</button></div>
             </form>
-            <div class="admin-inline-actions"><form method="post" action="/admin/bundle/{{b.id}}/toggle"><button class="mini">{{'Hide' if b.active else 'Show'}}</button></form><form method="post" action="/admin/bundle/{{b.id}}/delete"><button class="mini danger" onclick="return confirm('Remove or archive this bundle?')">Remove / Archive</button></form></div>
+            <div class="admin-inline-actions"><form method="post" action="/admin/bundle/{{b.id}}/toggle"><button class="mini">{{'Hide' if b.active else 'Show'}}</button></form><form method="post" action="/admin/bundle/{{b.id}}/delete"><button class="mini danger" onclick="return confirm('Remove or archive this bundle?')">Delete permanently</button></form></div>
           </div>
         </details>
       {% else %}<div class="empty-admin">No bundles yet.</div>{% endfor %}
@@ -223,10 +223,10 @@
     </section>
 
     <section id="orders" class="admin-card admin-anchor">
-      <div class="admin-section-head"><div><span class="eyebrow">SALES</span><h2>{{tr('Orders')}}</h2><p>Process orders and complete delivery from the same control center.</p></div><a class="soft-btn" href="/admin/export/orders.csv">⇩ CSV</a></div>
+      <div class="admin-section-head"><div><span class="eyebrow">SALES</span><h2>{{tr('Orders')}}</h2><p>Process orders and complete delivery from the same control center.</p></div><div class="admin-head-actions"><a class="soft-btn" href="/admin/export/orders.csv">⇩ CSV</a><form method="post" action="/admin/orders/reset" data-confirm="RESET ALL PURCHASE DATA? This will permanently delete all orders, deliveries, subscriptions, coupon usage and purchase rewards. Products, plans and customers will stay." style="display:inline"><button type="submit" class="soft-btn danger">↻ Reset all purchases</button></form></div></div>
       <div class="orders-v2">
         {% for o in orders[:30] %}
-        <a href="/admin/order/{{o.id}}" class="order-v2"><div class="order-id"><b>#{{o.id}}</b><small>{{o.created_at.strftime('%d.%m.%Y %H:%M')}}</small></div><div><b>@{{o.user.username}}</b><small>{{o.plan.product.name + ' · ' + o.plan.name if o.plan else o.bundle.name}}</small></div><div class="order-money"><b>€{{'%.2f'|format(o.sale_price)}}</b><small>Profit €{{'%.2f'|format(o.profit)}}</small></div><div class="order-status"><span class="status {% if o.status=='completed' %}live{% endif %}">{{o.status}}</span><div class="order-actions">{% if o.status!='processing' and o.status!='completed' %}<form method="post" action="/admin/order/{{o.id}}/processing"><button class="mini">Process</button></form>{% endif %}{% if o.status!='completed' and o.status!='cancelled' %}<form method="post" action="/admin/order/{{o.id}}/completed"><button class="mini save">Complete</button></form>{% endif %}{% if o.status!='cancelled' and o.status!='completed' %}<form method="post" action="/admin/order/{{o.id}}/cancelled"><button class="mini danger">×</button></form>{% endif %}</div></div></a>
+        <a href="/admin/order/{{o.id}}" class="order-v2"><div class="order-id"><b>{{public_order_ref(o)}}</b><small>{{o.created_at.strftime('%d.%m.%Y %H:%M')}}</small></div><div><b>@{{o.user.username}}</b><small>{{o.plan.product.name + ' · ' + o.plan.name if o.plan else o.bundle.name}}</small></div><div class="order-money"><b>€{{'%.2f'|format(o.sale_price)}}</b><small>Profit €{{'%.2f'|format(o.profit)}}</small></div><div class="order-status"><span class="status {% if o.status=='completed' %}live{% endif %}">{{o.status}}</span><div class="order-actions">{% if o.status!='processing' and o.status!='completed' %}<form method="post" action="/admin/order/{{o.id}}/processing"><button class="mini">Process</button></form>{% endif %}{% if o.status!='completed' and o.status!='cancelled' %}<form method="post" action="/admin/order/{{o.id}}/completed"><button class="mini save">Complete</button></form>{% endif %}{% if o.status!='cancelled' and o.status!='completed' %}<form method="post" action="/admin/order/{{o.id}}/cancelled"><button class="mini danger">×</button></form>{% endif %}<form method="post" action="/admin/order/{{o.id}}/delete" data-confirm="Permanently delete this order and its delivery/subscription data?" onsubmit="event.stopPropagation()"><button type="submit" class="mini danger order-delete-btn" onclick="event.stopPropagation()" title="Delete order">🗑</button></form></div></div></a>
         {% else %}<div class="empty-admin">No orders yet.</div>{% endfor %}
       </div>
     </section>
@@ -272,6 +272,16 @@
         const fresh = doc.getElementById(sectionId);
         if (fresh && section) { section.replaceWith(fresh); restoreOpen(fresh, openProducts, openProductId); }
       }
+      // Keep totals/counts in sync without a full page refresh.
+      const freshKpis = doc.querySelector('.admin-kpis');
+      const currentKpis = document.querySelector('.admin-kpis');
+      if (freshKpis && currentKpis) currentKpis.replaceWith(freshKpis);
+      const freshAnalytics = doc.getElementById('analytics');
+      const currentAnalytics = document.getElementById('analytics');
+      if (freshAnalytics && currentAnalytics) currentAnalytics.replaceWith(freshAnalytics);
+      const freshSide = doc.querySelector('.admin-v2-side nav');
+      const currentSide = document.querySelector('.admin-v2-side nav');
+      if (freshSide && currentSide) currentSide.replaceWith(freshSide);
       updateBulkCount(); initSortables();
       window.scrollTo({top: window.scrollY, behavior:'instant'});
     } catch (e) {
