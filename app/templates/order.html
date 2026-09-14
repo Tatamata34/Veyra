@@ -1,28 +1,45 @@
 {% extends "base.html" %}
 {% block content %}
+{% set product_name = order.plan.product.name if order.plan and order.plan.product else (order.bundle.name if order.bundle else "Product") %}
+{% set plan_name = order.plan.name if order.plan else "" %}
+{% set customer_name = order.user.username if order.user else "" %}
+{% set customer_email = order.user.email if order.user else "" %}
+{% set wa_text =
+"Hello VEYRA Support,%0A%0A"
+~ "I would like to complete my order.%0A%0A"
+~ "Order ID: #" ~ order.id
+~ "%0AProduct: " ~ product_name
+~ ("%0APlan: " ~ plan_name if plan_name else "")
+~ "%0AAmount: €" ~ ("%.2f"|format(order.sale_price or 0))
+~ ("%0ACustomer: " ~ customer_name if customer_name else "")
+~ ("%0AEmail: " ~ customer_email if customer_email else "")
+~ "%0A%0APlease help me complete this order. Thank you!"
+%}
+
 <section class="container" style="max-width:900px;margin:60px auto;">
   <div class="card" style="padding:40px;">
     <div class="eyebrow">Veyra</div>
+
     <h1>{{ tr("Order created") }}</h1>
-    <p class="lead">{{ tr("Your order is ready. Contact us on WhatsApp to complete it.") }}</p>
+
+    <p class="lead">
+      {{ tr("Your order is ready. Contact us on WhatsApp to complete it.") }}
+    </p>
 
     <div class="card" style="padding:28px;margin:28px 0;">
       <h2>#{{ order.id }}</h2>
 
       <p>
-        {% if order.plan %}
-          {{ order.plan.product.name }} · {{ order.plan.name }}
-        {% else %}
-          {{ order.bundle.name }}
-        {% endif %}
+        <strong>{{ product_name }}</strong>
+        {% if plan_name %} · {{ plan_name }}{% endif %}
       </p>
 
-      <strong>€{{ "%.2f"|format(order.sale_price) }}</strong>
+      <strong>€{{ "%.2f"|format(order.sale_price or 0) }}</strong>
     </div>
 
     <div style="display:flex;gap:12px;flex-wrap:wrap;">
       <a class="btn btn-primary"
-         href="https://api.whatsapp.com/send?phone=14242165211"
+         href="https://api.whatsapp.com/send?phone=14242165211&amp;text={{ wa_text }}"
          target="_blank"
          rel="noopener noreferrer">
         {{ tr("Open WhatsApp") }} →
