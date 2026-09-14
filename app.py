@@ -581,8 +581,8 @@ def telegram_api(method, payload=None):
 
 def send_telegram(message, reply_markup=None):
     ids = telegram_admin_ids()
-    if not os.getenv("TELEGRAM_BOT_TOKEN", "").strip() or len(ids) != 2:
-        return False, "Telegram bot token and exactly two admin Telegram IDs are required."
+    if not os.getenv("TELEGRAM_BOT_TOKEN", "").strip() or len(ids) < 1:
+        return False, "Telegram bot token and at least one admin Telegram ID are required."
     ok = False
     errors = []
     for chat_id in ids:
@@ -1264,6 +1264,13 @@ def notify_admins(message, event="new_order", order=None):
             if wa:
                 rows.append([{"text": "💬 Open WhatsApp", "url": wa}])
             kb = {"inline_keyboard": rows}
+        elif event == "support_ticket":
+            m = re.search(r"Ticket:\s*#(\d+)", message)
+            if m:
+                ticket_id = m.group(1)
+                admin_url = request.host_url.rstrip("/") + url_for("admin_v21") + f"#ticket-{ticket_id}" if has_request_context() else None
+                if admin_url:
+                    kb = {"inline_keyboard": [[{"text": "🎫 Open Ticket", "url": admin_url}]]}
         send_telegram(message, kb)
     # WhatsApp is intentionally optional; it requires Meta Cloud API credentials
     # and an approved template. Send only new-order notifications by default.
@@ -2600,16 +2607,10 @@ def v21_badges(product, plan=None):
 
 def v21_expiry(sub):
     now = datetime.utcnow()
-    try:
-        if not sub.expires_at:
-            return 0, "expired"
-        if sub.expires_at <= now:
-            sub.active = False
-            return 0, "expired"
-        days = max(0, (sub.expires_at-now).days)
-        return days, "soon" if days <= 7 else "active"
-    except Exception:
-        return 0, "expired"
+    if sub.expires_at <= now:
+        sub.active = False; return 0, "expired"
+    days = max(0, (sub.expires_at-now).days)
+    return days, "soon" if days <= 7 else "active"
 
 def v21_touch(product):
     key = session.get("v21_rv")
@@ -2651,16 +2652,7 @@ def v21_payment_methods():
 
 @app.context_processor
 def v21_context():
-    # Never let the global V21 notification counter break every page.
-    # This is especially important during first deploys or when the additive
-    # V21 tables have not been created yet.
-    unread = 0
-    if current_user.is_authenticated:
-        try:
-            unread = V21Notification.query.filter_by(user_id=current_user.id, read=False).count()
-        except Exception:
-            db.session.rollback()
-            unread = 0
+    unread = V21Notification.query.filter_by(user_id=current_user.id, read=False).count() if current_user.is_authenticated else 0
     return {"v21_tr": v21_tr, "v21_json": v21_json, "v21_billing": v21_billing, "v21_meta": v21_meta, "v21_discount": v21_discount, "v21_badges": v21_badges, "v21_unread": unread}
 
 # New storefront endpoints are separate so legacy payment/order URLs remain untouched.
@@ -2714,24 +2706,16 @@ def v21_support():
         msg=request.form.get("message","").strip()
         if not msg: flash("Please enter your message."); return redirect(url_for("v21_support"))
         t=V21Ticket(user_id=current_user.id,subject=subject,category=category,order_id=int(request.form["order_id"]) if request.form.get("order_id") else None)
-        db.session.add(t);db.session.flush();db.session.add(V21TicketReply(ticket_id=t.id,user_id=current_user.id,message=msg,is_admin=False));db.session.commit()
-        # Notify the configured Veyra admins immediately. This uses sendMessage
-        # only and does not depend on Telegram polling/getUpdates.
-        try:
-            order_text = f"\nOrder: #{t.order_id}" if t.order_id else ""
-            admin_url = request.url_root.rstrip("/") + url_for("admin_v21_ticket", ticket_id=t.id)
-            telegram_message = (
-                f"🎫 NEW VEYRA SUPPORT TICKET\n\n"
-                f"Ticket: #{t.id}\n"
-                f"Customer: @{current_user.username}\n"
-                f"Category: {t.category}\n"
-                f"Subject: {t.subject}{order_text}\n\n"
-                f"Message:\n{msg}\n\n"
-                f"Open in Admin: {admin_url}"
-            )
-            send_telegram(telegram_message)
-        except Exception as exc:
-            app.logger.warning("Support ticket Telegram notification failed: %s", exc)
+        db.session.add(t);db.session.flush()
+        db.session.add(V21TicketReply(ticket_id=t.id,user_id=current_user.id,message=msg,is_admin=False))
+        db.session.commit()
+        order_label = f"Order #{t.order_id}" if t.order_id else "No order linked"
+        admin_url = request.host_url.rstrip("/") + url_for("admin_v21") + f"#ticket-{t.id}"
+        notify_admins(
+            f"🎫 NEW VEYRA SUPPORT TICKET\n\nTicket: #{t.id}\nCustomer: @{current_user.username}\nCategory: {category}\nSubject: {subject}\n{order_label}\n\nMessage:\n{msg[:2500]}",
+            event="support_ticket",
+        )
+        # A direct admin link is sent separately because Telegram inline URLs are attached by notify_admins.
         return redirect(url_for("v21_ticket",ticket_id=t.id))
     tickets=V21Ticket.query.filter_by(user_id=current_user.id).order_by(V21Ticket.updated_at.desc()).all()
     return render_template("v21_support.html",tickets=tickets,orders=Order.query.filter_by(user_id=current_user.id).order_by(Order.created_at.desc()).limit(30).all())
@@ -2743,7 +2727,14 @@ def v21_ticket(ticket_id):
     if not t or t.user_id!=current_user.id:return ("Not found",404)
     if request.method=="POST":
         msg=request.form.get("message","").strip()
-        if msg: db.session.add(V21TicketReply(ticket_id=t.id,user_id=current_user.id,message=msg,is_admin=False));t.status="open";db.session.commit()
+        if msg:
+            db.session.add(V21TicketReply(ticket_id=t.id,user_id=current_user.id,message=msg,is_admin=False))
+            t.status="open"
+            db.session.commit()
+            notify_admins(
+                f"💬 NEW REPLY ON TICKET #{t.id}\n\nCustomer: @{current_user.username}\nSubject: {t.subject}\n\nMessage:\n{msg[:2500]}",
+                event="support_ticket",
+            )
         return redirect(url_for("v21_ticket",ticket_id=t.id))
     return render_template("v21_ticket.html",ticket=t)
 
@@ -2806,16 +2797,7 @@ def admin_v21():
                 db.session.commit();flash("Coupon rule saved.")
         return redirect(url_for("admin_v21"))
     products=Product.query.order_by(Product.sort_order,Product.name).all();deals=V21Deal.query.order_by(V21Deal.created_at.desc()).all();coupons=Coupon.query.order_by(Coupon.id.desc()).all();tickets=V21Ticket.query.order_by(V21Ticket.updated_at.desc()).limit(50).all();plans=Plan.query.filter_by(active=True).all()
-    unread_tickets=sum(1 for t in tickets if t.status=="open" and t.replies and not t.replies[-1].is_admin)
-    return render_template("v21_admin.html",methods=methods,products=products,deals=deals,coupons=coupons,tickets=tickets,plans=plans,unread_tickets=unread_tickets)
-
-@app.route("/admin/v21/ticket/<int:ticket_id>", methods=["GET"])
-@login_required
-def admin_v21_ticket(ticket_id):
-    if not current_user.is_admin:return ("Forbidden",403)
-    t=db.session.get(V21Ticket,ticket_id)
-    if not t:return ("Not found",404)
-    return render_template("v21_admin_ticket.html", ticket=t)
+    return render_template("v21_admin.html",methods=methods,products=products,deals=deals,coupons=coupons,tickets=tickets,plans=plans)
 
 @app.route("/admin/v21/ticket/<int:ticket_id>/reply", methods=["POST"])
 @login_required
@@ -2825,25 +2807,11 @@ def admin_v21_ticket_reply(ticket_id):
     if not t:return ("Not found",404)
     msg=request.form.get("message","").strip()
     if msg:
-        db.session.add(V21TicketReply(ticket_id=t.id,user_id=current_user.id,is_admin=True,message=msg));t.status=request.form.get("status","pending");v21_notify(t.user_id,"Support update",f"Your ticket #{t.id} has a new reply.","support");db.session.commit()
-    return redirect(url_for("admin_v21_ticket", ticket_id=t.id))
-
-@app.route("/admin/v21/ticket-count")
-@login_required
-def admin_v21_ticket_count():
-    if not current_user.is_admin:return {"count":0}
-    count=0
-    latest=None
-    try:
-        tickets=V21Ticket.query.filter(V21Ticket.status=="open").order_by(V21Ticket.updated_at.desc()).limit(100).all()
-        for t in tickets:
-            replies=t.replies or []
-            if replies and not replies[-1].is_admin:
-                count += 1
-                if latest is None: latest=t
-    except Exception:
-        pass
-    return {"count":count,"latest":({"id":latest.id,"subject":latest.subject} if latest else None)}
+        db.session.add(V21TicketReply(ticket_id=t.id,user_id=current_user.id,is_admin=True,message=msg))
+        t.status=request.form.get("status","pending")
+        v21_notify(t.user_id,"Support update",f"Your ticket #{t.id} has a new reply.","support")
+        db.session.commit()
+    return redirect(url_for("admin_v21") + f"#ticket-{t.id}")
 
 # Use the v2.1 storefront/dashboard while preserving legacy route endpoints for checkout/payment.
 def v21_index():
@@ -2855,65 +2823,27 @@ def v21_product(slug):
     return render_template("v21_product.html",product=p,meta=meta,included=included,faq=faq,plans=plans,reviews=reviews,saved=saved,recent=v21_recent())
 
 def v21_account():
-    """Safe read-only customer dashboard.
-    GET /account must never fail because notification generation or a stale
-    subscription/order record should not be able to break the dashboard.
-    Notifications are created by their dedicated flows instead.
-    """
-    try:
-        subs = Subscription.query.filter_by(user_id=current_user.id).order_by(Subscription.expires_at.asc()).all()
-    except Exception:
-        subs = []
-
-    # Keep subscription status current in memory; commit only when there is a
-    # real status change and never let that prevent the dashboard from loading.
-    changed = False
-    now = datetime.utcnow()
+    subs=Subscription.query.filter_by(user_id=current_user.id).order_by(Subscription.expires_at.asc()).all();changed=False
     for s in subs:
-        try:
-            new_active = bool(s.expires_at and s.expires_at > now)
-            if s.active != new_active:
-                s.active = new_active
-                changed = True
-        except Exception:
-            pass
-    if changed:
-        try:
-            db.session.commit()
-        except Exception:
-            db.session.rollback()
-
-    try:
-        orders = Order.query.filter_by(user_id=current_user.id).order_by(Order.created_at.desc()).all()
-    except Exception:
-        orders = []
-    try:
-        wishlist = Wishlist.query.filter_by(user_id=current_user.id).order_by(Wishlist.id.desc()).all()
-    except Exception:
-        wishlist = []
-    try:
-        tickets = V21Ticket.query.filter_by(user_id=current_user.id).order_by(V21Ticket.updated_at.desc()).limit(5).all()
-    except Exception:
-        tickets = []
-    try:
-        notes = V21Notification.query.filter_by(user_id=current_user.id).order_by(V21Notification.created_at.desc()).limit(6).all()
-    except Exception:
-        notes = []
-    try:
-        points = sum(x.points or 0 for x in LoyaltyPoint.query.filter_by(user_id=current_user.id).all())
-    except Exception:
-        points = 0
-
-    return render_template(
-        "v21_account.html",
-        subs=subs,
-        orders=orders,
-        wishlist=wishlist,
-        tickets=tickets,
-        notifications=notes,
-        points=points,
-        active_count=sum(1 for s in subs if getattr(s, "active", False)),
-    )
+        old=s.active;s.active=(s.expires_at>datetime.utcnow())
+        if old and not s.active:v21_notify(current_user.id,"Subscription expired",f"{s.product.name} has expired.","subscription");changed=True
+        elif s.active and (s.expires_at-datetime.utcnow()).days<=7 and old:
+            exists=V21Notification.query.filter_by(user_id=current_user.id,kind="expiration").filter(V21Notification.body.like(f"%{s.product.name}%")).first()
+            if not exists:v21_notify(current_user.id,"Subscription expiring soon",f"{s.product.name} expires on {s.expires_at.strftime('%d.%m.%Y')}.","expiration");changed=True
+    if changed:db.session.commit()
+    orders=Order.query.filter_by(user_id=current_user.id).order_by(Order.created_at.desc()).all()
+    for o in orders[:20]:
+        label = o.plan.product.name if o.plan else (o.bundle.name if o.bundle else "Order")
+        if not V21Notification.query.filter_by(user_id=current_user.id,kind="order").filter(V21Notification.body.like(f"%{public_order_ref(o)}%")).first():
+            v21_notify(current_user.id,"Order update",f"{public_order_ref(o)} · {label} · {o.status}","order")
+        if o.delivery and not V21Notification.query.filter_by(user_id=current_user.id,kind="delivery").filter(V21Notification.body.like(f"%{public_order_ref(o)}%")).first():
+            v21_notify(current_user.id,"Delivery ready",f"{public_order_ref(o)} is ready in your account.","delivery")
+    active_deals=V21Deal.query.filter_by(active=True).count()
+    if active_deals and not V21Notification.query.filter_by(user_id=current_user.id,kind="deal").first():
+        v21_notify(current_user.id,"New deals available",f"There are {active_deals} active deals to explore.","deal")
+    db.session.commit()
+    wishlist=Wishlist.query.filter_by(user_id=current_user.id).all();tickets=V21Ticket.query.filter_by(user_id=current_user.id).order_by(V21Ticket.updated_at.desc()).limit(5).all();notes=V21Notification.query.filter_by(user_id=current_user.id).order_by(V21Notification.created_at.desc()).limit(6).all();points=sum(x.points for x in LoyaltyPoint.query.filter_by(user_id=current_user.id).all())
+    return render_template("v21_account.html",subs=subs,orders=orders,wishlist=wishlist,tickets=tickets,notifications=notes,points=points,recent=v21_recent())
 
 def v21_wishlist_page():
     items=Wishlist.query.filter_by(user_id=current_user.id).order_by(Wishlist.id.desc()).all();return render_template("v21_wishlist.html",items=items)
