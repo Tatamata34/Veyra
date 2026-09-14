@@ -581,8 +581,8 @@ def telegram_api(method, payload=None):
 
 def send_telegram(message, reply_markup=None):
     ids = telegram_admin_ids()
-    if not os.getenv("TELEGRAM_BOT_TOKEN", "").strip() or len(ids) < 1:
-        return False, "Telegram bot token and at least one admin Telegram ID are required."
+    if not os.getenv("TELEGRAM_BOT_TOKEN", "").strip() or len(ids) != 2:
+        return False, "Telegram bot token and exactly two admin Telegram IDs are required."
     ok = False
     errors = []
     for chat_id in ids:
@@ -1264,13 +1264,6 @@ def notify_admins(message, event="new_order", order=None):
             if wa:
                 rows.append([{"text": "💬 Open WhatsApp", "url": wa}])
             kb = {"inline_keyboard": rows}
-        elif event == "support_ticket":
-            m = re.search(r"Ticket:\s*#(\d+)", message)
-            if m:
-                ticket_id = m.group(1)
-                admin_url = request.host_url.rstrip("/") + url_for("admin_v21") + f"#ticket-{ticket_id}" if has_request_context() else None
-                if admin_url:
-                    kb = {"inline_keyboard": [[{"text": "🎫 Open Ticket", "url": admin_url}]]}
         send_telegram(message, kb)
     # WhatsApp is intentionally optional; it requires Meta Cloud API credentials
     # and an approved template. Send only new-order notifications by default.
@@ -2705,17 +2698,13 @@ def v21_support():
         category=request.form.get("category","Other")
         msg=request.form.get("message","").strip()
         if not msg: flash("Please enter your message."); return redirect(url_for("v21_support"))
-        t=V21Ticket(user_id=current_user.id,subject=subject,category=category,order_id=int(request.form["order_id"]) if request.form.get("order_id") else None)
-        db.session.add(t);db.session.flush()
-        db.session.add(V21TicketReply(ticket_id=t.id,user_id=current_user.id,message=msg,is_admin=False))
-        db.session.commit()
-        order_label = f"Order #{t.order_id}" if t.order_id else "No order linked"
-        admin_url = request.host_url.rstrip("/") + url_for("admin_v21") + f"#ticket-{t.id}"
-        notify_admins(
-            f"🎫 NEW VEYRA SUPPORT TICKET\n\nTicket: #{t.id}\nCustomer: @{current_user.username}\nCategory: {category}\nSubject: {subject}\n{order_label}\n\nMessage:\n{msg[:2500]}",
-            event="support_ticket",
-        )
-        # A direct admin link is sent separately because Telegram inline URLs are attached by notify_admins.
+        t=V21Ticket(user_id=current_user.id,subject=subject,category=category,order_id=int(request.form["order_id"]) if request.form.get("order_id") else None,status="new")
+        db.session.add(t);db.session.flush();db.session.add(V21TicketReply(ticket_id=t.id,user_id=current_user.id,message=msg,is_admin=False));db.session.commit()
+        order_text = f"Order #{t.order_id}" if t.order_id else "No order linked"
+        customer = f"@{current_user.username}"
+        ticket_msg = (f"🎫 NEW VEYRA SUPPORT TICKET\n\nTicket: #{t.id}\nCustomer: {customer}\nCategory: {t.category}\nSubject: {t.subject}\n{order_text}\n\nMessage:\n{msg}")
+        kb = {"inline_keyboard":[[{"text":"🎫 Open Ticket","url":request.url_root.rstrip("/")+url_for("admin_v21_ticket",ticket_id=t.id)}]]}
+        send_telegram(ticket_msg, kb)
         return redirect(url_for("v21_ticket",ticket_id=t.id))
     tickets=V21Ticket.query.filter_by(user_id=current_user.id).order_by(V21Ticket.updated_at.desc()).all()
     return render_template("v21_support.html",tickets=tickets,orders=Order.query.filter_by(user_id=current_user.id).order_by(Order.created_at.desc()).limit(30).all())
@@ -2727,14 +2716,7 @@ def v21_ticket(ticket_id):
     if not t or t.user_id!=current_user.id:return ("Not found",404)
     if request.method=="POST":
         msg=request.form.get("message","").strip()
-        if msg:
-            db.session.add(V21TicketReply(ticket_id=t.id,user_id=current_user.id,message=msg,is_admin=False))
-            t.status="open"
-            db.session.commit()
-            notify_admins(
-                f"💬 NEW REPLY ON TICKET #{t.id}\n\nCustomer: @{current_user.username}\nSubject: {t.subject}\n\nMessage:\n{msg[:2500]}",
-                event="support_ticket",
-            )
+        if msg: db.session.add(V21TicketReply(ticket_id=t.id,user_id=current_user.id,message=msg,is_admin=False));t.status="open";db.session.commit()
         return redirect(url_for("v21_ticket",ticket_id=t.id))
     return render_template("v21_ticket.html",ticket=t)
 
@@ -2797,7 +2779,55 @@ def admin_v21():
                 db.session.commit();flash("Coupon rule saved.")
         return redirect(url_for("admin_v21"))
     products=Product.query.order_by(Product.sort_order,Product.name).all();deals=V21Deal.query.order_by(V21Deal.created_at.desc()).all();coupons=Coupon.query.order_by(Coupon.id.desc()).all();tickets=V21Ticket.query.order_by(V21Ticket.updated_at.desc()).limit(50).all();plans=Plan.query.filter_by(active=True).all()
-    return render_template("v21_admin.html",methods=methods,products=products,deals=deals,coupons=coupons,tickets=tickets,plans=plans)
+    new_count=V21Ticket.query.filter_by(status="new").count()
+    return render_template("v21_admin.html",methods=methods,products=products,deals=deals,coupons=coupons,tickets=tickets,plans=plans,new_count=new_count)
+
+@app.route("/admin/catalog")
+@login_required
+def admin_catalog():
+    if not current_user.is_admin:return ("Forbidden",403)
+    products=Product.query.order_by(Product.sort_order.asc(),Product.name.asc()).all()
+    return render_template("admin_catalog.html",products=products)
+
+@app.route("/admin/catalog/export")
+@login_required
+def admin_catalog_export():
+    if not current_user.is_admin:return ("Forbidden",403)
+    products=[]
+    for p in Product.query.order_by(Product.id.asc()).all():
+        products.append({"id":p.id,"name":p.name,"slug":p.slug,"category":p.category.name if p.category else "","active":bool(p.active),"featured":bool(p.featured),"image_url":p.image_url or "","card_label":p.card_label or "","price_label":p.price_label or "","plans":[{"id":pl.id,"name":pl.name,"months":pl.months,"price":pl.price,"sale_price":pl.sale_price,"cost_price":pl.cost_price,"active":bool(pl.active)} for pl in sorted(p.plans,key=lambda x:x.id)]})
+    from flask import Response
+    return Response(json.dumps(products,ensure_ascii=False,indent=2),mimetype="application/json",headers={"Content-Disposition":"attachment; filename=veyra-product-catalog-backup.json"})
+
+@app.route("/admin/v21/tickets")
+@login_required
+def admin_v21_tickets():
+    if not current_user.is_admin:return ("Forbidden",403)
+    tickets=V21Ticket.query.order_by(V21Ticket.updated_at.desc()).all()
+    new_count=V21Ticket.query.filter_by(status="new").count()
+    return render_template("v21_admin_tickets.html",tickets=tickets,new_count=new_count)
+
+@app.route("/admin/v21/ticket/<int:ticket_id>", methods=["GET","POST"])
+@login_required
+def admin_v21_ticket(ticket_id):
+    if not current_user.is_admin:return ("Forbidden",403)
+    t=db.session.get(V21Ticket,ticket_id)
+    if not t:return ("Not found",404)
+    if request.method=="POST":
+        msg=request.form.get("message","").strip()
+        status=request.form.get("status",t.status)
+        if msg:
+            db.session.add(V21TicketReply(ticket_id=t.id,user_id=current_user.id,is_admin=True,message=msg))
+            v21_notify(t.user_id,"Support update",f"Your ticket #{t.id} has a new reply.","support")
+        if status in {"new","open","pending","resolved"}: t.status=status
+        db.session.commit()
+        if msg:
+            send_telegram(f"💬 REPLY SENT — Ticket #{t.id}\nCustomer: @{t.user.username}\nStatus: {t.status}\n\n{msg}")
+        return redirect(url_for("admin_v21_ticket",ticket_id=t.id))
+    if t.status=="new":
+        t.status="pending"
+        db.session.commit()
+    return render_template("v21_admin_ticket.html",ticket=t)
 
 @app.route("/admin/v21/ticket/<int:ticket_id>/reply", methods=["POST"])
 @login_required
@@ -2807,11 +2837,8 @@ def admin_v21_ticket_reply(ticket_id):
     if not t:return ("Not found",404)
     msg=request.form.get("message","").strip()
     if msg:
-        db.session.add(V21TicketReply(ticket_id=t.id,user_id=current_user.id,is_admin=True,message=msg))
-        t.status=request.form.get("status","pending")
-        v21_notify(t.user_id,"Support update",f"Your ticket #{t.id} has a new reply.","support")
-        db.session.commit()
-    return redirect(url_for("admin_v21") + f"#ticket-{t.id}")
+        db.session.add(V21TicketReply(ticket_id=t.id,user_id=current_user.id,is_admin=True,message=msg));t.status=request.form.get("status","pending");v21_notify(t.user_id,"Support update",f"Your ticket #{t.id} has a new reply.","support");db.session.commit()
+    return redirect(url_for("admin_v21"))
 
 # Use the v2.1 storefront/dashboard while preserving legacy route endpoints for checkout/payment.
 def v21_index():
