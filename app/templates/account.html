@@ -1,68 +1,82 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="container" style="max-width:1200px;margin:35px auto 80px;padding:0 18px;">
-  <div style="display:flex;justify-content:space-between;align-items:center;gap:18px;flex-wrap:wrap;margin-bottom:25px;">
+<div class="container" style="max-width:1180px;margin:35px auto 80px;padding:0 18px;">
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:18px;flex-wrap:wrap;margin-bottom:24px;">
     <div>
-      <div style="font-size:13px;font-weight:800;letter-spacing:.12em;color:#60708d;">ACCOUNT</div>
-      <h1 style="margin:7px 0 4px;color:#17233f;">{{ tr("Welcome back") }}, @{{ current_user.username }}</h1>
-      <p style="margin:0;color:#74829a;">Manage your orders, subscriptions and support in one place.</p>
+      <div style="font-size:12px;font-weight:900;letter-spacing:.14em;color:#60708d;">VEYRA ACCOUNT</div>
+      <h1 style="margin:7px 0;color:#17233f;">{{ tr('Welcome back') }}, @{{ current_user.username }}</h1>
+      <p style="margin:0;color:#718099;">Manage your orders, subscriptions and support.</p>
     </div>
-    <a href="{{ url_for('logout') }}" style="text-decoration:none;padding:12px 18px;border-radius:14px;background:#f3f6fb;border:1px solid #dfe5ef;color:#24314b;font-weight:800;">↪ {{ tr("Logout") }}</a>
+    <a href="/logout" style="text-decoration:none;padding:12px 18px;border-radius:14px;background:#f4f6fb;border:1px solid #dfe5ef;color:#182541;font-weight:800;">↪ {{ tr('Logout') }}</a>
   </div>
 
-  <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-bottom:22px;">
-    <div class="v21-panel"><div style="font-size:24px;">📦</div><div style="font-size:30px;font-weight:850;">{{ orders|length }}</div><div class="muted">{{ v21_tr('My Orders') }}</div></div>
-    <div class="v21-panel"><div style="font-size:24px;">⚡</div><div style="font-size:30px;font-weight:850;">{{ active_count }}</div><div class="muted">{{ v21_tr('My Subscriptions') }}</div></div>
-    <div class="v21-panel"><div style="font-size:24px;">♡</div><div style="font-size:30px;font-weight:850;">{{ wishlist|length }}</div><div class="muted">{{ tr('Wishlist') }}</div></div>
-    <div class="v21-panel"><div style="font-size:24px;">⭐</div><div style="font-size:30px;font-weight:850;">{{ points }}</div><div class="muted">{{ tr('Loyalty points') }}</div></div>
+  <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-bottom:20px;">
+    <div class="v21-panel"><div style="font-size:22px;">📦</div><b style="display:block;font-size:30px;margin-top:6px;">{{ orders|length }}</b><span class="muted">{{ v21_tr('My Orders') }}</span></div>
+    <div class="v21-panel"><div style="font-size:22px;">⚡</div><b style="display:block;font-size:30px;margin-top:6px;">{{ active_count }}</b><span class="muted">{{ v21_tr('My Subscriptions') }}</span></div>
+    <div class="v21-panel"><div style="font-size:22px;">♡</div><b style="display:block;font-size:30px;margin-top:6px;">{{ wishlist|length }}</b><span class="muted">{{ tr('Wishlist') }}</span></div>
+    <div class="v21-panel"><div style="font-size:22px;">⭐</div><b style="display:block;font-size:30px;margin-top:6px;">{{ points }}</b><span class="muted">{{ tr('Loyalty points') }}</span></div>
   </div>
 
-  <div style="display:grid;grid-template-columns:1.35fr .65fr;gap:18px;">
+  <div style="display:grid;grid-template-columns:minmax(0,1.4fr) minmax(280px,.6fr);gap:18px;">
     <div>
       <section id="subscriptions" class="v21-panel" style="margin-bottom:18px;">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:15px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
           <div><span class="muted">{{ v21_tr('My Subscriptions') }}</span><h2 style="margin:4px 0;">{{ v21_tr('Subscription status') }}</h2></div>
-          <span style="font-size:24px;">⏳</span>
+          <span style="font-size:25px;">⏳</span>
         </div>
 
         {% for s in subs %}
-          <div style="display:flex;align-items:center;gap:13px;padding:15px 0;border-top:1px solid #edf0f5;flex-wrap:wrap;">
-            <div style="width:48px;height:48px;border-radius:14px;background:#f0f3ff;display:grid;place-items:center;font-weight:900;">
-              {% if s.product %}{{ s.product.name[:1] }}{% else %}V{% endif %}
+          <div style="display:flex;align-items:center;gap:13px;flex-wrap:wrap;padding:15px 0;border-top:1px solid #edf0f5;">
+            <div style="width:48px;height:48px;border-radius:14px;background:#f0f3ff;display:grid;place-items:center;font-weight:900;overflow:hidden;">
+              {% if s.product and product_logo(s.product) %}
+                <img src="{{ product_logo(s.product) }}" style="width:100%;height:100%;object-fit:contain;">
+              {% elif s.product %}
+                {{ s.product.name[:1] }}
+              {% else %}
+                V
+              {% endif %}
             </div>
             <div style="flex:1;min-width:180px;">
               <b>{% if s.product %}{{ s.product.name }}{% else %}{{ tr('Product unavailable') }}{% endif %}</b>
-              <div class="muted" style="margin-top:4px;">
-                {% if s.expires_at %}Expires {{ s.expires_at.strftime('%d.%m.%Y') }}{% else %}No expiration date{% endif %}
-              </div>
+              <small class="muted" style="display:block;margin-top:4px;">
+                {% if s.expires_at %}Expires {{ s.expires_at.strftime('%d.%m.%Y %H:%M') }}{% else %}No expiration date{% endif %}
+              </small>
             </div>
-            <span style="padding:7px 11px;border-radius:999px;background:#e9f8f2;color:#118765;font-weight:800;font-size:12px;">
-              {% if s.expires_at and s.expires_at < now_utc %}{{ v21_tr('Expired') }}{% elif not s.active %}{{ v21_tr('Expired') }}{% else %}{{ v21_tr('Active') }}{% endif %}
+            <span style="padding:7px 11px;border-radius:999px;font-size:12px;font-weight:850;background:{% if s.active %}#e9f8f2{% else %}#fff0f0{% endif %};color:{% if s.active %}#118765{% else %}#b43d3d{% endif %};">
+              {% if s.active %}{{ v21_tr('Active') }}{% else %}{{ v21_tr('Expired') }}{% endif %}
             </span>
-            {% if s.product %}<a href="{{ url_for('product', slug=s.product.slug) }}" style="text-decoration:none;font-weight:800;">View →</a>{% endif %}
+            {% if s.product %}
+              <a href="{{ url_for('product', slug=s.product.slug) }}" class="v21-btn ghost">{{ v21_tr('Renew') if not s.active else v21_tr('View product') }} →</a>
+            {% endif %}
           </div>
         {% else %}
-          <div style="padding:22px 0;color:#74829a;">{{ tr('No subscriptions yet.') }}</div>
+          <p class="muted">{{ tr('No subscriptions yet.') }}</p>
         {% endfor %}
       </section>
 
       <section id="orders" class="v21-panel">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:15px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
           <div><span class="muted">{{ v21_tr('My Orders') }}</span><h2 style="margin:4px 0;">{{ v21_tr('Order history') }}</h2></div>
-          <span style="font-size:24px;">🧾</span>
+          <span style="font-size:25px;">🧾</span>
         </div>
 
         {% for o in orders %}
           <div style="padding:17px 0;border-top:1px solid #edf0f5;">
             <div style="display:flex;justify-content:space-between;gap:15px;flex-wrap:wrap;">
-              <div>
-                <b>{{ o.public_ref if o.public_ref is defined else ('#' ~ o.id) }}</b>
-                <div style="margin-top:5px;font-weight:750;">
-                  {% if o.plan and o.plan.product %}{{ o.plan.product.name }}{% if o.plan.name %} · {{ o.plan.name }}{% endif %}
-                  {% elif o.bundle %}{{ o.bundle.name }}
-                  {% else %}{{ tr('Order') }} #{{ o.id }}{% endif %}
+              <div style="min-width:0;">
+                <b>{{ public_order_ref(o) }}</b>
+                <div style="font-weight:800;margin-top:5px;">
+                  {% if o.plan and o.plan.product %}
+                    {{ o.plan.product.name }}{% if o.plan.name %} · {{ o.plan.name }}{% endif %}
+                  {% elif o.bundle %}
+                    {{ o.bundle.name }}
+                  {% else %}
+                    {{ tr('Order') }} #{{ o.id }}
+                  {% endif %}
                 </div>
-                <div class="muted" style="margin-top:4px;">{% if o.created_at %}{{ o.created_at.strftime('%d.%m.%Y %H:%M') }} · {% endif %}{{ o.status or '' }}</div>
+                <small class="muted" style="display:block;margin-top:4px;">
+                  {% if o.created_at %}{{ o.created_at.strftime('%d.%m.%Y %H:%M') }} · {% endif %}{{ o.status }}
+                </small>
               </div>
               <strong style="font-size:20px;">€{{ '%.2f'|format(o.sale_price or 0) }}</strong>
             </div>
@@ -74,7 +88,7 @@
             {% endif %}
           </div>
         {% else %}
-          <div style="padding:22px 0;color:#74829a;">{{ tr('No orders yet.') }}</div>
+          <p class="muted">{{ tr('No orders yet.') }}</p>
         {% endfor %}
       </section>
     </div>
@@ -82,32 +96,37 @@
     <div>
       <section class="v21-panel" style="margin-bottom:18px;">
         <span class="muted">{{ v21_tr('Notifications') }}</span>
-        <h2 style="margin:4px 0 15px;">{{ v21_tr('Latest') }}</h2>
+        <h2 style="margin:4px 0 12px;">{{ v21_tr('Latest') }}</h2>
         {% for n in notifications %}
-          <a href="{{ url_for('v21_notifications') }}" style="display:block;text-decoration:none;color:inherit;padding:13px 0;border-top:1px solid #edf0f5;">
+          <a href="/v21/notifications" style="display:block;text-decoration:none;color:inherit;padding:13px 0;border-top:1px solid #edf0f5;">
             <b>{{ n.title }}</b>
-            <div class="muted" style="margin-top:4px;">{{ n.body }}</div>
+            <small class="muted" style="display:block;margin-top:4px;">{{ n.body }}</small>
           </a>
-        {% else %}<p class="muted">{{ v21_tr('No notifications.') }}</p>{% endfor %}
+        {% else %}
+          <p class="muted">{{ v21_tr('No notifications.') }}</p>
+        {% endfor %}
+        <a href="/v21/notifications" class="v21-btn ghost" style="display:block;text-align:center;margin-top:10px;">🔔 {{ v21_tr('View all') }}</a>
       </section>
 
       <section class="v21-panel" style="margin-bottom:18px;">
         <span class="muted">{{ v21_tr('Support Tickets') }}</span>
-        <h2 style="margin:4px 0 15px;">{{ v21_tr('Need help?') }}</h2>
+        <h2 style="margin:4px 0 12px;">{{ v21_tr('Need help?') }}</h2>
         {% for t in tickets %}
-          <a href="{{ url_for('v21_ticket', ticket_id=t.id) }}" style="display:block;text-decoration:none;color:inherit;padding:13px 0;border-top:1px solid #edf0f5;">
+          <a href="/v21/support/{{ t.id }}" style="display:block;text-decoration:none;color:inherit;padding:13px 0;border-top:1px solid #edf0f5;">
             <b>#{{ t.id }} · {{ t.subject }}</b>
-            <div class="muted" style="margin-top:4px;">{{ t.status }}</div>
+            <small class="muted" style="display:block;margin-top:4px;">{{ t.status }}</small>
           </a>
-        {% else %}<p class="muted">{{ v21_tr('Create a ticket if you need help.') }}</p>{% endfor %}
-        <a href="{{ url_for('v21_support') }}" class="v21-btn primary" style="display:block;text-align:center;margin-top:12px;">💬 {{ v21_tr('Create Ticket') }} →</a>
+        {% else %}
+          <p class="muted">{{ v21_tr('Create a ticket if you need help.') }}</p>
+        {% endfor %}
+        <a href="/v21/support" class="v21-btn primary" style="display:block;text-align:center;margin-top:10px;">💬 {{ v21_tr('Create Ticket') }} →</a>
       </section>
 
       <section class="v21-panel">
-        <div style="display:grid;gap:10px;">
-          <a href="/wishlist" style="text-decoration:none;color:inherit;padding:13px;border-radius:14px;background:#f6f8fc;">♡ {{ tr('Wishlist') }}</a>
-          <a href="/v21/notifications" style="text-decoration:none;color:inherit;padding:13px;border-radius:14px;background:#f6f8fc;">🔔 {{ v21_tr('Notifications') }}</a>
-          <a href="/v21/support" style="text-decoration:none;color:inherit;padding:13px;border-radius:14px;background:#f6f8fc;">💬 {{ v21_tr('Support Tickets') }}</a>
+        <div style="display:grid;gap:9px;">
+          <a href="/wishlist" style="text-decoration:none;color:inherit;padding:13px;border-radius:13px;background:#f6f8fc;">♡ {{ tr('Wishlist') }}</a>
+          <a href="/v21/notifications" style="text-decoration:none;color:inherit;padding:13px;border-radius:13px;background:#f6f8fc;">🔔 {{ v21_tr('Notifications') }}</a>
+          <a href="/v21/support" style="text-decoration:none;color:inherit;padding:13px;border-radius:13px;background:#f6f8fc;">💬 {{ v21_tr('Support Tickets') }}</a>
         </div>
       </section>
     </div>
@@ -116,7 +135,7 @@
 
 <style>
 @media(max-width:850px){
-  .container > div[style*="grid-template-columns:1.35fr"]{grid-template-columns:1fr!important}
+  .container > div[style*="minmax(0,1.4fr)"]{grid-template-columns:1fr!important}
 }
 @media(max-width:650px){
   .container > div[style*="repeat(4"]{grid-template-columns:repeat(2,minmax(0,1fr))!important}
