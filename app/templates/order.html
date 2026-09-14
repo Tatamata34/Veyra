@@ -2,53 +2,102 @@
 {% block content %}
 {% set product_name = order.plan.product.name if order.plan and order.plan.product else (order.bundle.name if order.bundle else "Product") %}
 {% set plan_name = order.plan.name if order.plan else "" %}
-{% set customer_name = order.user.username if order.user else "" %}
-{% set customer_email = order.user.email if order.user else "" %}
-{% set wa_text =
-"Hello VEYRA Support,%0A%0A"
-~ "I would like to complete my order.%0A%0A"
-~ "Order ID: #" ~ order.id
-~ "%0AProduct: " ~ product_name
-~ ("%0APlan: " ~ plan_name if plan_name else "")
-~ "%0AAmount: €" ~ ("%.2f"|format(order.sale_price or 0))
-~ ("%0ACustomer: " ~ customer_name if customer_name else "")
-~ ("%0AEmail: " ~ customer_email if customer_email else "")
-~ "%0A%0APlease help me complete this order. Thank you!"
-%}
+<div class="container" style="max-width:900px;margin:45px auto 80px;padding:0 18px;">
+  <div style="background:linear-gradient(135deg,#eef3ff,#ffffff);border:1px solid #dfe6f4;border-radius:30px;padding:34px;box-shadow:0 20px 60px rgba(25,45,90,.10);">
+    <div style="display:flex;align-items:center;gap:14px;margin-bottom:25px;">
+      <div style="width:58px;height:58px;border-radius:18px;background:linear-gradient(135deg,#4361ee,#7048ff);display:grid;place-items:center;color:#fff;font-size:28px;">✓</div>
+      <div>
+        <div style="font-size:13px;font-weight:800;letter-spacing:.12em;color:#60708d;">VEYRA</div>
+        <div style="font-weight:700;color:#182541;">{{ tr("Order created") }}</div>
+      </div>
+    </div>
 
-<section class="container" style="max-width:900px;margin:60px auto;">
-  <div class="card" style="padding:40px;">
-    <div class="eyebrow">Veyra</div>
-
-    <h1>{{ tr("Order created") }}</h1>
-
-    <p class="lead">
+    <h1 style="font-size:clamp(34px,6vw,58px);line-height:1.05;margin:0 0 14px;color:#17233f;">{{ tr("Order created") }}</h1>
+    <p style="font-size:18px;line-height:1.6;color:#687792;margin:0 0 30px;">
       {{ tr("Your order is ready. Contact us on WhatsApp to complete it.") }}
     </p>
 
-    <div class="card" style="padding:28px;margin:28px 0;">
-      <h2>#{{ order.id }}</h2>
+    <div style="background:#fff;border:1px solid #e1e7f2;border-radius:24px;padding:24px;margin-bottom:22px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:18px;flex-wrap:wrap;">
+        <div>
+          <div style="font-size:13px;color:#7a879d;font-weight:700;text-transform:uppercase;letter-spacing:.08em;">Order</div>
+          <div style="font-size:27px;font-weight:850;color:#17233f;margin-top:5px;">#{{ order.id }}</div>
+        </div>
+        <div style="text-align:right;">
+          <div style="font-size:13px;color:#7a879d;font-weight:700;">TOTAL</div>
+          <div style="font-size:28px;font-weight:850;color:#17233f;">€{{ "%.2f"|format(order.sale_price or 0) }}</div>
+        </div>
+      </div>
 
-      <p>
-        <strong>{{ product_name }}</strong>
-        {% if plan_name %} · {{ plan_name }}{% endif %}
-      </p>
+      <div style="height:1px;background:#edf0f6;margin:22px 0;"></div>
 
-      <strong>€{{ "%.2f"|format(order.sale_price or 0) }}</strong>
+      <div style="display:flex;gap:15px;align-items:center;">
+        <div style="width:50px;height:50px;border-radius:15px;background:#f0f3ff;display:grid;place-items:center;font-size:23px;">🛍️</div>
+        <div>
+          <div style="font-size:19px;font-weight:800;color:#17233f;">{{ product_name }}</div>
+          {% if plan_name %}<div style="color:#73809a;margin-top:4px;">{{ plan_name }}</div>{% endif %}
+        </div>
+      </div>
     </div>
 
-    <div style="display:flex;gap:12px;flex-wrap:wrap;">
-      <a class="btn btn-primary"
-         href="https://api.whatsapp.com/send?phone=14242165211&amp;text={{ wa_text }}"
-         target="_blank"
-         rel="noopener noreferrer">
-        {{ tr("Open WhatsApp") }} →
-      </a>
+    <div id="wa-error" style="display:none;background:#fff3f3;border:1px solid #ffd5d5;color:#9b3030;border-radius:16px;padding:14px;margin-bottom:14px;">
+      WhatsApp could not be opened. Please check that WhatsApp is installed on your phone.
+    </div>
 
-      <a class="btn" href="{{ url_for('account') }}">
-        {{ tr("Go to account") }}
+    <div style="display:grid;gap:12px;">
+      <button id="open-wa"
+        type="button"
+        data-order-id="{{ order.id }}"
+        data-product="{{ product_name|e }}"
+        data-plan="{{ plan_name|e }}"
+        data-amount="{{ '%.2f'|format(order.sale_price or 0) }}"
+        data-customer="{{ current_user.username|e if current_user.is_authenticated else '' }}"
+        data-email="{{ current_user.email|e if current_user.is_authenticated else '' }}"
+        style="width:100%;border:0;border-radius:18px;padding:17px 20px;background:linear-gradient(135deg,#25d366,#128c7e);color:white;font-size:17px;font-weight:800;cursor:pointer;box-shadow:0 12px 30px rgba(18,140,126,.22);">
+        💬 {{ tr("Open WhatsApp") }} →
+      </button>
+
+      <a href="{{ url_for('account') }}"
+         style="width:100%;box-sizing:border-box;text-align:center;text-decoration:none;border-radius:18px;padding:17px 20px;background:#f3f6fb;border:1px solid #dfe5ef;color:#1b2946;font-size:17px;font-weight:800;">
+        👤 {{ tr("Go to account") }}
       </a>
+    </div>
+
+    <div style="display:flex;justify-content:center;gap:20px;flex-wrap:wrap;margin-top:22px;color:#7a879d;font-size:13px;">
+      <span>🔒 Secure order</span>
+      <span>⚡ Fast support</span>
+      <span>🛡️ VEYRA support</span>
     </div>
   </div>
-</section>
+</div>
+
+<script>
+(function () {
+  const btn = document.getElementById('open-wa');
+  const error = document.getElementById('wa-error');
+  if (!btn) return;
+
+  btn.addEventListener('click', function () {
+    const d = btn.dataset;
+    const lines = [
+      'Hello VEYRA Support,',
+      '',
+      'I would like to complete my order.',
+      '',
+      'Order ID: #' + d.orderId,
+      'Product: ' + d.product
+    ];
+    if (d.plan) lines.push('Plan: ' + d.plan);
+    lines.push('Amount: €' + d.amount);
+    if (d.customer) lines.push('Customer: ' + d.customer);
+    if (d.email) lines.push('Email: ' + d.email);
+    lines.push('', 'Please help me complete this order. Thank you!');
+
+    const message = lines.join('\n');
+    const url = 'https://api.whatsapp.com/send?phone=14242165211&text=' + encodeURIComponent(message);
+
+    window.location.href = url;
+  });
+})();
+</script>
 {% endblock %}
