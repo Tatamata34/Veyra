@@ -6,18 +6,32 @@
       <span class="admin-v2-logo">V</span>
       <div><strong>{{store_name}} Admin</strong><small>{{tr('Control center')}}</small></div>
     </div>
-    <nav>
-      <a class="active" href="#dashboard">⌂ <span>{{tr('Dashboard')}}</span></a>
-      <a href="#products">▣ <span>{{tr('Products')}}</span><b>{{products|length}}</b></a>
-      <a href="#analytics">◒ <span>{{tr('Analytics')}}</span></a>
-      <a href="#bundles">▦ <span>{{tr('Bundles')}}</span><b>{{bundles|length}}</b></a>
-      <a href="#orders">◷ <span>{{tr('Orders')}}</span>{% if pending_orders %}<b class="nav-alert">{{pending_orders}}</b>{% endif %}</a>
-      <a href="#customers">♙ <span>{{tr('Customers')}}</span><b>{{users|length}}</b></a>
-      <a href="#subscriptions">◉ <span>{{tr('Subscriptions')}}</span><b>{{subscriptions|length}}</b></a>
-      <a href="#marketing">◇ <span>{{tr('Marketing')}}</span></a>
-      <a href="#telegram">✈ <span>{{tr('Telegram')}}</span></a>
-      <a href="#settings">⚙ <span>{{tr('Settings')}}</span></a>
-      <a href="#activity">≡ <span>{{tr('Activity')}}</span></a>
+    <nav class="admin-nav-modern" aria-label="Admin navigation">
+      <div class="admin-nav-group"><span class="admin-nav-label">OVERVIEW</span>
+        <a href="#dashboard" data-admin-section="dashboard" class="active"><i>⌂</i><span>{{tr('Dashboard')}}</span></a>
+        <a href="#analytics" data-admin-section="analytics"><i>◒</i><span>{{tr('Analytics')}}</span></a>
+      </div>
+      <div class="admin-nav-group"><span class="admin-nav-label">STORE</span>
+        <a href="#products" data-admin-section="products"><i>▣</i><span>{{tr('Products')}}</span><b>{{products|length}}</b></a>
+        <a href="/admin/catalog"><i>▤</i><span>{{v21_tr('Product Catalog')}}</span><b>↗</b></a>
+        <a href="#bundles" data-admin-section="bundles"><i>▦</i><span>{{tr('Bundles')}}</span><b>{{bundles|length}}</b></a>
+      </div>
+      <div class="admin-nav-group"><span class="admin-nav-label">SALES & ACCESS</span>
+        <a href="#orders" data-admin-section="orders"><i>◷</i><span>{{tr('Orders')}}</span>{% if pending_orders %}<b class="nav-alert">{{pending_orders}}</b>{% endif %}</a>
+        <a href="#subscriptions" data-admin-section="subscriptions"><i>◉</i><span>{{tr('Subscriptions')}}</span><b>{{subscriptions|length}}</b></a>
+      </div>
+      <div class="admin-nav-group"><span class="admin-nav-label">CUSTOMERS</span>
+        <a href="#customers" data-admin-section="customers"><i>♙</i><span>{{tr('Customers')}}</span><b>{{users|length}}</b></a>
+        <a href="#tickets" data-admin-section="tickets"><i>🎫</i><span>{{v21_tr('Tickets')}}</span>{% if new_ticket_count %}<b class="nav-alert">{{new_ticket_count}}</b>{% endif %}</a>
+      </div>
+      <div class="admin-nav-group"><span class="admin-nav-label">GROWTH & TOOLS</span>
+        <a href="#marketing" data-admin-section="marketing"><i>◇</i><span>{{tr('Marketing')}}</span></a>
+        <a href="#telegram" data-admin-section="telegram"><i>✈</i><span>{{tr('Telegram')}}</span>{% if telegram_ready %}<em class="nav-online"></em>{% endif %}</a>
+      </div>
+      <div class="admin-nav-group"><span class="admin-nav-label">SYSTEM</span>
+        <a href="#settings" data-admin-section="settings"><i>⚙</i><span>{{tr('Settings')}}</span></a>
+        <a href="#activity" data-admin-section="activity"><i>≡</i><span>{{tr('Activity')}}</span></a>
+      </div>
     </nav>
     <a class="admin-store-link" href="/">← {{tr('View store')}}</a>
   </aside>
@@ -57,6 +71,8 @@
       <a href="#products"><i>＋</i><span><b>{{tr('Add product')}}</b><small>Logo, category, plans & pricing</small></span></a>
       <a href="#bundles"><i>▦</i><span><b>{{tr('Add bundle')}}</b><small>Combine plans with one price</small></span></a>
       <a href="#orders"><i>◷</i><span><b>{{tr('Manage orders')}}</b><small>Status & delivery</small></span></a>
+      <a href="/admin/v21/tickets"><i>🎫</i><span><b>{{v21_tr('Support Tickets')}}</b><small>{{new_ticket_count}} {{v21_tr('new tickets')}}</small></span></a>
+      <a href="/admin/catalog"><i>🔒</i><span><b>{{v21_tr('Product Catalog')}}</b><small>{{v21_tr('Protected product & pricing data')}}</small></span></a>
       <a href="/admin/export/orders.csv"><i>⇩</i><span><b>Export CSV</b><small>Download order history</small></span></a>
     </section>
 
@@ -226,9 +242,27 @@
       <div class="admin-section-head"><div><span class="eyebrow">SALES</span><h2>{{tr('Orders')}}</h2><p>Process orders and complete delivery from the same control center.</p></div><div class="admin-head-actions"><a class="soft-btn" href="/admin/export/orders.csv">⇩ CSV</a><form method="post" action="/admin/orders/reset" data-noAjax="1" data-confirm="RESET ALL PURCHASE DATA? This will permanently delete all orders, deliveries, subscriptions, coupon usage and purchase rewards. Products, plans and customers will stay." style="display:inline"><input type="hidden" name="csrf_token" value="{{csrf_token}}"><button type="submit" class="soft-btn danger">↻ Reset all purchases</button></form></div></div>
       <div class="orders-v2">
         {% for o in orders[:30] %}
-        <a href="/admin/order/{{o.id}}" class="order-v2"><div class="order-id"><b>{{public_order_ref(o)}}</b><small>{{o.created_at.strftime('%d.%m.%Y %H:%M')}}</small></div><div><b>@{{o.user.username}}</b><small>{{o.plan.product.name + ' · ' + o.plan.name if o.plan else o.bundle.name}}</small></div><div class="order-money"><b>€{{'%.2f'|format(o.sale_price)}}</b><small>Profit €{{'%.2f'|format(o.profit)}}</small></div><div class="order-status"><span class="status {% if o.status=='completed' %}live{% endif %}">{{o.status}}</span><div class="order-actions">{% if o.status!='processing' and o.status!='completed' %}<form method="post" action="/admin/order/{{o.id}}/processing"><button class="mini">Process</button></form>{% endif %}{% if o.status!='completed' and o.status!='cancelled' %}<form method="post" action="/admin/order/{{o.id}}/completed"><button class="mini save">Complete</button></form>{% endif %}{% if o.status!='cancelled' and o.status!='completed' %}<form method="post" action="/admin/order/{{o.id}}/cancelled"><button class="mini danger">×</button></form>{% endif %}<form method="post" action="/admin/order/{{o.id}}/delete" data-confirm="Permanently delete this order and its delivery/subscription data?" onsubmit="event.stopPropagation()"><button type="submit" class="mini danger order-delete-btn" onclick="event.stopPropagation()" title="Delete order">🗑</button></form></div></div></a>
+        <a href="/admin/order/{{o.id}}" class="order-v2"><div class="order-id"><b>{{public_order_ref(o)}}</b><small>{{o.created_at.strftime('%d.%m.%Y %H:%M')}}</small></div><div><b>@{{o.user.username}}</b><small>{{o.plan.product.name + ' · ' + o.plan.name if o.plan else o.bundle.name}}</small></div><div class="order-money"><b>€{{'%.2f'|format(o.sale_price)}}</b><small>Profit €{{'%.2f'|format(o.profit)}}</small></div><div class="order-status"><span class="status {% if o.status=='completed' %}live{% endif %}">{{o.status}}</span><div class="order-actions">{% if o.status!='processing' and o.status!='completed' %}<form method="post" action="/admin/order/{{o.id}}/processing"><button class="mini">Process</button></form>{% endif %}{% if o.status!='completed' and o.status!='cancelled' %}<form method="post" action="/admin/order/{{o.id}}/completed"><button class="mini save">Complete</button></form>{% endif %}{% if o.status!='cancelled' and o.status!='completed' %}<form method="post" action="/admin/order/{{o.id}}/cancelled"><button class="mini danger">×</button></form>{% endif %}<form method="post" action="/admin/order/{{o.id}}/delete" data-noAjax="1" data-confirm="Permanently delete this order and its delivery/subscription data?" onsubmit="event.stopPropagation()"><button type="submit" class="mini danger order-delete-btn" onclick="event.stopPropagation()" title="Delete order">🗑</button></form></div></div></a>
         {% else %}<div class="empty-admin">No orders yet.</div>{% endfor %}
       </div>
+    </section>
+
+    <section id="tickets" class="admin-card admin-anchor admin-screen">
+      <div class="admin-section-head">
+        <div><span class="eyebrow">SUPPORT CENTER</span><h2>{{v21_tr('Tickets')}}</h2><p>Customer support requests in one clean workspace.</p></div>
+        <div class="admin-head-actions"><span class="admin-count">{{ticket_count }} total</span><a class="soft-btn" href="/admin/v21/tickets">Open full support center →</a></div>
+      </div>
+      {% if tickets %}
+      <div class="admin-ticket-list">
+        {% for t in tickets %}
+        <a class="admin-ticket-item" href="/admin/v21/ticket/{{t.id}}">
+          <div class="ticket-avatar">{{ (t.user.username[:1] if t.user and t.user.username else 'U')|upper }}</div>
+          <div class="ticket-main"><div class="ticket-title-row"><strong>#{{t.id}} · {{t.subject}}</strong><span class="ticket-status status-{{t.status}}">{{t.status|upper}}</span></div><p>@{{t.user.username if t.user else 'customer'}} · {{t.category}}{% if t.order_id %} · Order #{{t.order_id}}{% endif %}</p><small>{{t.updated_at.strftime('%d.%m.%Y %H:%M') if t.updated_at else ''}}</small></div>
+          <span class="ticket-arrow">→</span>
+        </a>
+        {% endfor %}
+      </div>
+      {% else %}<div class="admin-empty-state"><div>🎫</div><h3>No support tickets yet</h3><p>New customer tickets will appear here automatically.</p></div>{% endif %}
     </section>
 
     <section id="customers" class="admin-card admin-anchor"><div class="admin-section-head"><div><span class="eyebrow">CUSTOMERS</span><h2>{{tr('Customers')}}</h2><p>Accounts, Telegram connections and customer activity.</p></div></div><div class="customer-grid-v2">{% for u in users[:30] %}<a href="/admin/customer/{{u.id}}" class="customer-v2"><span class="avatar">{{u.username[:1]|upper}}</span><div><b>@{{u.username}}</b><small>{{u.email}}</small><small>{{'Telegram linked' if u.telegram_id else 'Telegram not linked'}}</small></div><span>→</span></a>{% else %}<div class="empty-admin">No customers yet.</div>{% endfor %}</div></section>
@@ -330,3 +364,44 @@
 })();
 </script>
 {% endblock %}
+
+<script>
+(function(){
+  const nav=document.querySelector('.admin-nav-modern');
+  if(!nav) return;
+  const links=[...nav.querySelectorAll('[data-admin-section]')];
+  const screens=[...document.querySelectorAll('.admin-anchor')];
+  const top=document.querySelector('.admin-v2-top');
+  const kpis=document.querySelector('.admin-kpis');
+  const quick=document.querySelector('.admin-quick-grid');
+  const analytics=document.getElementById('analytics');
+  function activate(id, replaceHash){
+    const target=document.getElementById(id)||document.getElementById('dashboard');
+    const dashboard=id==='dashboard';
+    screens.forEach(el=>el.classList.toggle('admin-screen-active', el===target || (dashboard && el===analytics)));
+    if(top) top.classList.toggle('admin-dashboard-visible',dashboard);
+    if(kpis) kpis.classList.toggle('admin-dashboard-visible',dashboard);
+    if(quick) quick.classList.toggle('admin-dashboard-visible',dashboard);
+    links.forEach(a=>a.classList.toggle('active',a.dataset.adminSection===id));
+    if(replaceHash) history.replaceState(null,'','#'+id);
+    window.scrollTo({top:0,behavior:'smooth'});
+  }
+  links.forEach(a=>a.addEventListener('click',e=>{ if(a.dataset.adminSection){e.preventDefault();activate(a.dataset.adminSection,true);} }));
+  const initial=(location.hash||'#dashboard').slice(1);
+  activate(document.getElementById(initial)?initial:'dashboard',false);
+  window.addEventListener('hashchange',()=>activate((location.hash||'#dashboard').slice(1),false));
+})();
+</script>
+<style>
+/* VEYRA ADMIN — clean single-screen navigation */
+.admin-v2{max-width:1500px;margin:0 auto;padding:28px 28px 70px;display:grid;grid-template-columns:245px minmax(0,1fr);gap:24px;align-items:start}
+.admin-v2-side{position:sticky;top:88px;height:calc(100vh - 115px);max-height:850px;overflow:auto;background:rgba(255,255,255,.94);border:1px solid #e3e8f2;border-radius:24px;padding:18px 12px;box-shadow:0 18px 50px rgba(25,45,90,.08);scrollbar-width:thin}
+.admin-v2-brand{display:flex;align-items:center;gap:11px;padding:6px 9px 18px;margin-bottom:8px;border-bottom:1px solid #edf0f5}
+.admin-v2-brand strong{font-size:14px}.admin-v2-brand small{display:block;color:#8a95a8;font-size:10px;margin-top:2px}.admin-v2-logo{width:40px;height:40px;border-radius:13px;display:grid;place-items:center;background:linear-gradient(135deg,#4169ff,#6b4df6);color:white;font-weight:900;box-shadow:0 8px 20px rgba(65,105,255,.25)}
+.admin-nav-group{margin:12px 0 16px}.admin-nav-label{display:block;padding:0 10px 6px;color:#a0a9b9;font-size:9px;font-weight:900;letter-spacing:.11em}.admin-nav-modern a{display:flex;align-items:center;gap:10px;padding:10px;border-radius:11px;color:#59677f;font-size:12px;font-weight:700;margin:2px 0;transition:.18s}.admin-nav-modern a i{width:20px;text-align:center;font-style:normal;font-size:14px;color:#8290a7}.admin-nav-modern a span{flex:1}.admin-nav-modern a b{font-size:10px;background:#f0f3f8;color:#75829a;border-radius:999px;padding:3px 7px}.admin-nav-modern a:hover{background:#f5f7fc;color:#274ee0}.admin-nav-modern a.active{background:linear-gradient(135deg,#edf2ff,#f4f1ff);color:#315eea}.admin-nav-modern a.active i{color:#315eea}.admin-nav-modern a .nav-alert,.admin-nav-modern a b.nav-alert{background:#ffe8ea;color:#d84f58}.nav-online{width:7px;height:7px;border-radius:50%;background:#19aa73;box-shadow:0 0 0 3px #e6f8f0}.admin-store-link{display:flex;justify-content:center;padding:11px;background:#f6f8fc;border-radius:12px;font-size:11px;font-weight:800;color:#56647b;margin-top:8px}
+.admin-v2-main{min-width:0}.admin-v2-top,.admin-kpis,.admin-quick-grid,.admin-anchor{display:none}.admin-v2-top.admin-dashboard-visible,.admin-kpis.admin-dashboard-visible,.admin-quick-grid.admin-dashboard-visible,.admin-anchor.admin-screen-active{display:block}.admin-kpis.admin-dashboard-visible{display:grid}.admin-quick-grid.admin-dashboard-visible{display:grid}.admin-anchor.admin-screen-active{animation:adminFade .18s ease}.admin-screen-active{min-height:420px}@keyframes adminFade{from{opacity:.2;transform:translateY(5px)}to{opacity:1;transform:none}}
+.admin-v2-top{padding:8px 4px 20px;display:none}.admin-v2-top.admin-dashboard-visible{display:flex;justify-content:space-between;align-items:end;gap:20px}.admin-v2-top h1{margin:8px 0 5px;font-size:36px;letter-spacing:-.04em}.admin-v2-top p{margin:0;color:#78869d;font-size:13px}.admin-top-actions{display:flex;gap:8px}.admin-kpis{grid-template-columns:repeat(6,minmax(0,1fr));gap:10px;margin-bottom:18px}.admin-kpi{background:#fff;border:1px solid #e4e9f2;border-radius:16px;padding:15px;box-shadow:0 8px 25px rgba(30,52,100,.045)}.admin-kpi span{display:block;color:#8490a4;font-size:10px;font-weight:700}.admin-kpi strong{display:block;font-size:20px;margin:4px 0}.admin-kpi small{color:#a0a9b8;font-size:9px}.admin-card{background:rgba(255,255,255,.97);border:1px solid #e2e7f0;border-radius:22px;padding:20px;box-shadow:0 14px 40px rgba(30,52,100,.055)}
+.admin-section-head{display:flex;justify-content:space-between;align-items:flex-start;gap:20px;margin-bottom:18px}.admin-section-head h2{margin:6px 0 3px;font-size:24px;letter-spacing:-.03em}.admin-section-head p{margin:0;color:#7b889d;font-size:12px}.admin-head-actions{display:flex;gap:8px;align-items:center}.admin-count{padding:8px 11px;background:#f5f7fb;border-radius:10px;color:#68758b;font-size:10px;font-weight:800}.admin-ticket-list{display:flex;flex-direction:column;gap:8px}.admin-ticket-item{display:flex;align-items:center;gap:13px;padding:14px;border:1px solid #e7ebf2;border-radius:15px;background:#fff;transition:.16s}.admin-ticket-item:hover{border-color:#cbd6ff;box-shadow:0 8px 24px rgba(40,70,150,.07);transform:translateY(-1px)}.ticket-avatar{width:38px;height:38px;border-radius:12px;display:grid;place-items:center;background:#eef2ff;color:#4169ff;font-weight:900}.ticket-main{flex:1;min-width:0}.ticket-title-row{display:flex;gap:10px;align-items:center}.ticket-title-row strong{font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ticket-main p{margin:3px 0;color:#78869b;font-size:10px}.ticket-main small{color:#a0a9b7;font-size:9px}.ticket-status{font-size:8px;font-weight:900;padding:4px 7px;border-radius:999px;flex:none}.status-new{background:#fff0f0;color:#d44e58}.status-open{background:#edf3ff;color:#4169ff}.status-pending{background:#fff6df;color:#a87312}.status-resolved{background:#eaf9f2;color:#159567}.ticket-arrow{font-size:18px;color:#9aa6b8}.admin-empty-state{text-align:center;padding:70px 20px;color:#7d899c}.admin-empty-state>div{font-size:32px}.admin-empty-state h3{margin:8px 0 3px;color:#1b2a48}.admin-empty-state p{margin:0;font-size:12px}
+@media(max-width:1050px){.admin-v2{grid-template-columns:1fr}.admin-v2-side{position:relative;top:0;height:auto;max-height:none}.admin-nav-modern{display:flex;gap:8px;overflow:auto}.admin-nav-group{display:flex;gap:4px;margin:0;white-space:nowrap}.admin-nav-label{display:none}.admin-nav-modern a{padding:9px}.admin-v2-brand,.admin-store-link{display:none}.admin-kpis{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:650px){.admin-v2{padding:12px;gap:12px}.admin-kpis{grid-template-columns:repeat(2,1fr)}.admin-v2-top.admin-dashboard-visible{display:block}.admin-top-actions{margin-top:12px}.admin-section-head{display:block}.admin-head-actions{margin-top:12px}.admin-ticket-item{padding:11px}.ticket-status{display:none}}
+</style>
