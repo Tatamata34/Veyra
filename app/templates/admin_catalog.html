@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="v21-admin catalog-page">
+  <div class="v21-dhead"><div><span>🔒 PROTECTED CATALOG</span><h1>Product Catalog</h1><p>Products, plans and prices are stored in the database — not inside app.py. Deploying new code does not replace this catalog.</p></div><div style="display:flex;gap:10px"><a class="v21-btn ghost" href="/admin">← Admin</a><a class="v21-btn primary" href="/admin/catalog/export">⬇ Backup JSON</a></div></div>
+  <div class="catalog-safe"><b>🔐 Data protection</b><span>This page reads the live database. Product names, plans, prices, sale prices and costs are not seeded or overwritten on startup.</span></div>
+  <section class="v21-panel"><div class="catalog-grid">
+  {% for p in products %}<article class="catalog-card"><div class="catalog-top"><div class="catalog-logo">{{p.name[:1]|upper}}</div><div><h3>{{p.name}}</h3><small>{{p.category.name if p.category else 'Uncategorized'}} · {{'Active' if p.active else 'Hidden'}}</small></div></div><div class="catalog-plans">{% for pl in p.plans|sort(attribute='id') %}<div><span>{{pl.name}} · {{pl.months}} mo.</span><b>€{{'%.2f'|format(pl.sale_price if pl.sale_price is not none else pl.price)}}</b></div>{% else %}<small>No plans</small>{% endfor %}</div></article>{% endfor %}
+  </div></section>
+</div>
+<style>.catalog-page{max-width:1200px;margin:auto}.catalog-safe{display:flex;gap:12px;align-items:center;padding:14px 16px;margin:15px 0;border:1px solid #cfe0ff;background:#f5f8ff;border-radius:14px}.catalog-safe span{color:#667085}.catalog-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px}.catalog-card{border:1px solid #e3e7ef;border-radius:16px;padding:16px;background:#fff}.catalog-top{display:flex;gap:12px;align-items:center}.catalog-logo{width:44px;height:44px;border-radius:12px;display:grid;place-items:center;background:#eef2ff;font-weight:900}.catalog-card h3{margin:0}.catalog-card small{color:#7b8498}.catalog-plans{margin-top:14px}.catalog-plans div{display:flex;justify-content:space-between;padding:9px 0;border-top:1px solid #eef1f5}</style>
+{% endblock %}
