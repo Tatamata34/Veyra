@@ -8,10 +8,12 @@ import time
 import secrets
 import hashlib
 import base64
+import csv
+import io
 import requests
 
 from dotenv import load_dotenv
-from flask import Flask, render_template, redirect, url_for, request, flash, session, has_app_context, abort
+from flask import Flask, render_template, redirect, url_for, request, flash, session, has_app_context, abort, Response
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -238,6 +240,16 @@ class AuditLog(db.Model):
     action = db.Column(db.String(120), nullable=False)
     details = db.Column(db.Text, default="")
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    admin_user = db.relationship("User")
+
+class V21CatalogBackup(db.Model):
+    __tablename__ = "v21_catalog_backups"
+    id = db.Column(db.Integer, primary_key=True)
+    label = db.Column(db.String(180), nullable=False)
+    kind = db.Column(db.String(30), default="snapshot")
+    payload = db.Column(db.Text, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_by = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True)
     admin_user = db.relationship("User")
 
 TRANSLATIONS = {
@@ -1632,14 +1644,16 @@ def admin():
         telegram_ready=bool(os.getenv("TELEGRAM_BOT_TOKEN")),
         audit_logs=AuditLog.query.order_by(AuditLog.created_at.desc()).limit(30).all(),
         store_settings={x.key:x.value for x in AdminSetting.query.all()},
-        new_ticket_count=V21Ticket.query.filter_by(status="new").count() if "V21Ticket" in globals() else 0,
-        tickets=V21Ticket.query.order_by(V21Ticket.updated_at.desc()).limit(100).all() if "V21Ticket" in globals() else [],
-        ticket_count=V21Ticket.query.count() if "V21Ticket" in globals() else 0)
+        new_ticket_count=V21Ticket.query.filter_by(status="new").count() if "V21Ticket" in globals() else 0)
 
 @app.route("/admin/plan/<int:plan_id>", methods=["POST"])
 @login_required
 def edit_plan(plan_id):
     if not admin_required(): return ("Forbidden",403)
+    try:
+        v21_save_catalog_backup("Before catalog change", "auto")
+    except Exception:
+        pass
     p = db.session.get(Plan, plan_id)
     p.price = float(request.form["price"])
     sale = request.form.get("sale_price","").strip()
@@ -1758,12 +1772,13 @@ def admin_customer_detail(user_id):
 def admin_orders_reset():
     """Reset transactional/test purchase data while preserving the catalog and customer accounts."""
     if not admin_required(): return ("Forbidden", 403)
+    # Detach support tickets first because they may reference an order.
+    if "V21Ticket" in globals():
+        V21Ticket.query.update({V21Ticket.order_id: None}, synchronize_session=False)
     # Remove dependent transactional records first so this works on PostgreSQL and SQLite.
     delivery_count = OrderDelivery.query.delete(synchronize_session=False)
     subscription_count = Subscription.query.delete(synchronize_session=False)
     coupon_usage_count = CouponUsage.query.delete(synchronize_session=False)
-    if "V21Ticket" in globals():
-        V21Ticket.query.update({"order_id": None}, synchronize_session=False)
     order_count = Order.query.delete(synchronize_session=False)
     # Test purchase rewards are transactional too; keep customers/products/settings intact.
     loyalty_count = LoyaltyPoint.query.delete(synchronize_session=False)
@@ -1781,11 +1796,11 @@ def admin_order_delete(order_id):
     o = db.session.get(Order, order_id)
     if not o: return ("Not found", 404)
     public_label = f"{public_order_ref(o)}"
+    if "V21Ticket" in globals():
+        V21Ticket.query.filter_by(order_id=o.id).update({V21Ticket.order_id: None}, synchronize_session=False)
     OrderDelivery.query.filter_by(order_id=o.id).delete(synchronize_session=False)
     Subscription.query.filter_by(order_id=o.id).delete(synchronize_session=False)
     CouponUsage.query.filter_by(order_id=o.id).delete(synchronize_session=False)
-    if "V21Ticket" in globals():
-        V21Ticket.query.filter_by(order_id=o.id).update({"order_id": None}, synchronize_session=False)
     db.session.delete(o)
     db.session.commit()
     audit("Order deleted", public_label)
@@ -1963,6 +1978,10 @@ def save_product_image(file_obj):
 @login_required
 def admin_product_new():
     if not admin_required(): return ("Forbidden",403)
+    try:
+        v21_save_catalog_backup("Before catalog change", "auto")
+    except Exception:
+        pass
     name = request.form.get("name", "").strip()
     category = db.session.get(Category, int(request.form.get("category_id", 0) or 0))
     if not name or not category:
@@ -1994,6 +2013,10 @@ def admin_product_new():
 @login_required
 def admin_product_edit(product_id):
     if not admin_required(): return ("Forbidden",403)
+    try:
+        v21_save_catalog_backup("Before catalog change", "auto")
+    except Exception:
+        pass
     p = db.session.get(Product, product_id)
     if not p: return ("Not found",404)
     name = request.form.get("name", p.name).strip()
@@ -2022,6 +2045,10 @@ def admin_product_edit(product_id):
 @login_required
 def admin_products_bulk_price():
     if not admin_required(): return ("Forbidden",403)
+    try:
+        v21_save_catalog_backup("Before catalog change", "auto")
+    except Exception:
+        pass
     product_ids = []
     for raw in request.form.getlist("product_ids"):
         try:
@@ -2093,6 +2120,10 @@ def admin_products_bulk_price():
 @login_required
 def admin_product_delete(product_id):
     if not admin_required(): return ("Forbidden",403)
+    try:
+        v21_save_catalog_backup("Before catalog change", "auto")
+    except Exception:
+        pass
     p = db.session.get(Product, product_id)
     if not p: return ("Not found",404)
 
@@ -2563,11 +2594,36 @@ _V21_UI = {
     "fr": {"Control center":"Centre de contrôle","Manage your store faster":"Gérez votre boutique plus rapidement","Search products":"Rechercher des produits","Collapse all":"Tout réduire","Expand all":"Tout développer","Product settings":"Paramètres du produit","Save product":"Enregistrer le produit","Delete permanently":"Supprimer définitivement","Save plan":"Enregistrer le plan","Delete plan":"Supprimer le plan","Available":"Disponible","Unavailable":"Indisponible","What you receive":"Ce que vous recevez","WHAT YOU RECEIVE":"CE QUE VOUS RECEVEZ","Everything you need":"Tout ce dont vous avez besoin","Questions":"Questions","Order history":"Historique des commandes","Need help?":"Besoin d'aide ?","Create a ticket if you need help.":"Créez un ticket si vous avez besoin d'aide.","Future checkout methods":"Futurs moyens de paiement","What customers see":"Ce que voient les clients","Create a deal from existing plans":"Créer une offre à partir des plans existants","Scope existing coupons":"Appliquer les coupons existants","Customer tickets":"Tickets clients","Reply to customer":"Répondre au client","Deal name":"Nom de l'offre","Description":"Description","Start":"Début","End":"Fin","Reply":"Répondre","This is shown before checkout so you know exactly what you are buying.":"Ceci est affiché avant le paiement pour que vous sachiez exactement ce que vous achetez.","Secure checkout":"Paiement sécurisé","products ready to explore":"produits à découvrir","Choose your service, compare plans and see exactly what you receive.":"Choisissez votre service, comparez les plans et voyez exactement ce que vous recevez.","Clear plans and prices.":"Plans et prix clairs.","No hidden price before checkout.":"Aucun prix caché avant le paiement.","Orders, subscriptions and wishlist.":"Commandes, abonnements et favoris.","Tickets when you need help.":"Tickets lorsque vous avez besoin d'aide."},
     "sq": {"Control center":"Qendra e kontrollit","Manage your store faster":"Menaxho dyqanin më shpejt","Search products":"Kërko produkte","Collapse all":"Mbyll të gjitha","Expand all":"Hap të gjitha","Product settings":"Cilësimet e produktit","Save product":"Ruaj produktin","Delete permanently":"Fshije përgjithmonë","Save plan":"Ruaj planin","Delete plan":"Fshi planin","Available":"Në dispozicion","Unavailable":"Nuk është në dispozicion","What you receive":"Çfarë merr","WHAT YOU RECEIVE":"ÇFARË MERR","Everything you need":"Gjithçka që të duhet","Questions":"Pyetje","Order history":"Historiku i porosive","Need help?":"Ke nevojë për ndihmë?","Create a ticket if you need help.":"Krijo një tiketë nëse ke nevojë për ndihmë.","Future checkout methods":"Metodat e ardhshme të pagesës","What customers see":"Çfarë shohin klientët","Create a deal from existing plans":"Krijo ofertë nga planet ekzistuese","Scope existing coupons":"Përcakto kuponët ekzistues","Customer tickets":"Tiketa të klientëve","Reply to customer":"Përgjigju klientit","Deal name":"Emri i ofertës","Description":"Përshkrimi","Start":"Fillimi","End":"Fundi","Reply":"Përgjigju","This is shown before checkout so you know exactly what you are buying.":"Kjo shfaqet para pagesës që ta dish saktë çfarë po blen.","Secure checkout":"Pagesë e sigurt","products ready to explore":"produkte për t'u parë","Choose your service, compare plans and see exactly what you receive.":"Zgjidh shërbimin, krahaso planet dhe shiko saktë çfarë merr.","Clear plans and prices.":"Plane dhe çmime të qarta.","No hidden price before checkout.":"Pa çmime të fshehura para pagesës.","Orders, subscriptions and wishlist.":"Porosi, abonime dhe lista e dëshirave.","Tickets when you need help.":"Tiketa kur të duhet ndihmë."}
 }
-_V21_UI["en"].update({"Tickets":"Tickets","Product Catalog":"Product Catalog","Support Tickets":"Support Tickets","new tickets":"new tickets","Protected product & pricing data":"Protected product & pricing data","Smart digital shop":"SMART DIGITAL SHOP"})
-_V21_UI["de"].update({"Tickets":"Tickets","Product Catalog":"Produktkatalog","Support Tickets":"Support-Tickets","new tickets":"neue Tickets","Protected product & pricing data":"Geschützte Produkt- und Preisdaten","Smart digital shop":"SMARTER DIGITALER SHOP"})
-_V21_UI["fr"].update({"Tickets":"Tickets","Product Catalog":"Catalogue produits","Support Tickets":"Tickets support","new tickets":"nouveaux tickets","Protected product & pricing data":"Données produits et prix protégées","Smart digital shop":"BOUTIQUE DIGITALE"})
-_V21_UI["sq"].update({"Tickets":"Tiketa","Product Catalog":"Katalogu i produkteve","Support Tickets":"Tiketa të mbështetjes","new tickets":"tiketa të reja","Protected product & pricing data":"Të dhënat e produkteve dhe çmimeve të mbrojtura","Smart digital shop":"DYQAN DIGJITAL I MENÇUR"})
 for _l,_vals in _V21_UI.items(): V21_LANG[_l].update(_vals)
+
+def v21_catalog_payload():
+    """Complete catalog snapshot. Product data lives in DB; this is an explicit backup only."""
+    out=[]
+    for p in Product.query.order_by(Product.id.asc()).all():
+        m=V21ProductMeta.query.filter_by(product_id=p.id).first()
+        out.append({
+            "id":p.id,"name":p.name,"slug":p.slug,"category_id":p.category_id,
+            "category":p.category.name if p.category else "","active":bool(p.active),
+            "featured":bool(p.featured),"sort_order":p.sort_order,"image_url":p.image_url or "",
+            "card_label":p.card_label or "","price_label":p.price_label or "",
+            "plans":[{"id":pl.id,"name":pl.name,"months":pl.months,"price":pl.price,
+                       "sale_price":pl.sale_price,"cost_price":pl.cost_price,"active":bool(pl.active),
+                       "sort_order":pl.sort_order} for pl in sorted(p.plans,key=lambda x:x.id)],
+            "meta":({"product_type":m.product_type,"region":m.region,"delivery":m.delivery,
+                     "guarantee":m.guarantee,"receive_type":m.receive_type,
+                     "included_json":m.included_json,"faq_json":m.faq_json,
+                     "badges_json":m.badges_json,"keywords":m.keywords,"desc_i18n":m.desc_i18n} if m else None)
+        })
+    return {"format":"veyra-catalog-v2","created_at":datetime.utcnow().isoformat(),"products":out}
+
+def v21_save_catalog_backup(label="Automatic catalog snapshot", kind="snapshot"):
+    payload=json.dumps(v21_catalog_payload(),ensure_ascii=False)
+    b=V21CatalogBackup(label=label,kind=kind,payload=payload,created_by=(current_user.id if current_user.is_authenticated else None))
+    db.session.add(b); db.session.flush()
+    # Keep the backup table bounded; never delete the live catalog.
+    old=V21CatalogBackup.query.order_by(V21CatalogBackup.created_at.desc()).offset(50).all()
+    for x in old: db.session.delete(x)
+    return b
 
 def v21_tr(text):
     lang = getattr(request, "lang", None) or session.get("lang", "en")
@@ -2657,7 +2713,7 @@ def v21_payment_methods():
 @app.context_processor
 def v21_context():
     unread = V21Notification.query.filter_by(user_id=current_user.id, read=False).count() if current_user.is_authenticated else 0
-    return {"v21_tr": v21_tr, "v21_json": v21_json, "v21_billing": v21_billing, "v21_meta": v21_meta, "v21_discount": v21_discount, "v21_badges": v21_badges, "v21_expiry": v21_expiry, "v21_unread": unread}
+    return {"v21_tr": v21_tr, "v21_json": v21_json, "v21_billing": v21_billing, "v21_meta": v21_meta, "v21_discount": v21_discount, "v21_badges": v21_badges, "v21_unread": unread}
 
 # New storefront endpoints are separate so legacy payment/order URLs remain untouched.
 @app.route("/v21/search")
@@ -2798,7 +2854,7 @@ def admin_v21():
 def admin_catalog():
     if not current_user.is_admin:return ("Forbidden",403)
     products=Product.query.order_by(Product.sort_order.asc(),Product.name.asc()).all()
-    return render_template("admin_catalog.html",products=products)
+    return render_template("admin_catalog.html",products=products,backups=V21CatalogBackup.query.order_by(V21CatalogBackup.created_at.desc()).limit(25).all())
 
 @app.route("/admin/catalog/export")
 @login_required
@@ -2814,7 +2870,10 @@ def admin_catalog_export():
 @login_required
 def admin_v21_tickets():
     if not current_user.is_admin:return ("Forbidden",403)
-    tickets=V21Ticket.query.order_by(V21Ticket.updated_at.desc()).all()
+    status=request.args.get("status", "all").strip().lower()
+    q=V21Ticket.query
+    if status in {"new","open","waiting","pending","resolved","closed"}: q=q.filter_by(status=status)
+    tickets=q.order_by(V21Ticket.updated_at.desc()).all()
     new_count=V21Ticket.query.filter_by(status="new").count()
     return render_template("v21_admin_tickets.html",tickets=tickets,new_count=new_count)
 
@@ -2830,7 +2889,7 @@ def admin_v21_ticket(ticket_id):
         if msg:
             db.session.add(V21TicketReply(ticket_id=t.id,user_id=current_user.id,is_admin=True,message=msg))
             v21_notify(t.user_id,"Support update",f"Your ticket #{t.id} has a new reply.","support")
-        if status in {"new","open","pending","resolved"}: t.status=status
+        if status in {"new","open","waiting","pending","resolved","closed"}: t.status=status
         db.session.commit()
         if msg:
             send_telegram(f"💬 REPLY SENT — Ticket #{t.id}\nCustomer: @{t.user.username}\nStatus: {t.status}\n\n{msg}")
@@ -2912,3 +2971,101 @@ with app.app_context():
             _m.desc_i18n = json.dumps({"en":"18 months of Gemini Premium + 5 TB Google Drive storage, activated directly on your personal Google account."}, ensure_ascii=False)
             _m.keywords = "gemini google ai ai pro premium google drive 5tb"
     db.session.commit()
+
+
+# ---------------- V21 Admin Control Center v2 ----------------
+def _admin_only():
+    return current_user.is_authenticated and current_user.is_admin
+
+@app.route("/admin/catalog/backup", methods=["POST"])
+@login_required
+def admin_catalog_backup():
+    if not _admin_only(): return ("Forbidden",403)
+    b=v21_save_catalog_backup("Manual catalog backup", "manual")
+    db.session.commit()
+    flash(f"Catalog backup #{b.id} created.")
+    return redirect(url_for("admin_catalog"))
+
+@app.route("/admin/catalog/export.csv")
+@login_required
+def admin_catalog_export_csv():
+    if not _admin_only(): return ("Forbidden",403)
+    output=io.StringIO(); w=csv.writer(output)
+    w.writerow(["product_id","product","slug","category","active","featured","plan_id","plan","months","price","sale_price","cost_price","plan_active","plan_sort_order"])
+    for p in Product.query.order_by(Product.id.asc()).all():
+        for pl in sorted(p.plans,key=lambda x:x.id) or [None]:
+            w.writerow([p.id,p.name,p.slug,p.category.name if p.category else "",int(bool(p.active)),int(bool(p.featured)),
+                        pl.id if pl else "",pl.name if pl else "",pl.months if pl else "",pl.price if pl else "",
+                        pl.sale_price if pl else "",pl.cost_price if pl else "",int(bool(pl.active)) if pl else "",pl.sort_order if pl else ""])
+    return Response(output.getvalue(),mimetype="text/csv",headers={"Content-Disposition":"attachment; filename=veyra-catalog.csv"})
+
+@app.route("/admin/catalog/restore", methods=["POST"])
+@login_required
+def admin_catalog_restore():
+    if not _admin_only(): return ("Forbidden",403)
+    f=request.files.get("backup")
+    if not f or not f.filename.lower().endswith(".json"):
+        flash("Upload a Veyra JSON catalog backup."); return redirect(url_for("admin_catalog"))
+    try:
+        data=json.loads(f.read().decode("utf-8"))
+        products=data.get("products") if isinstance(data,dict) else None
+        if not isinstance(products,list): raise ValueError("Invalid catalog format")
+        before=v21_save_catalog_backup("Before restore", "pre-restore")
+        changed=[]; added=0; updated=0
+        for item in products:
+            pid=item.get("id"); p=db.session.get(Product,pid) if pid else None
+            if not p:
+                slug=item.get("slug") or make_slug(item.get("name","product"))
+                if Product.query.filter_by(slug=slug).first():
+                    # Never create a duplicate silently.
+                    continue
+                cat=db.session.get(Category,item.get("category_id"))
+                if not cat and item.get("category"):
+                    cat=Category.query.filter_by(name=item["category"]).first()
+                if not cat: continue
+                p=Product(name=item.get("name") or "Product",slug=slug,category_id=cat.id)
+                db.session.add(p); db.session.flush(); added+=1
+            old=(p.name,p.active,p.featured,p.sort_order,p.image_url,p.card_label,p.price_label)
+            p.name=item.get("name",p.name); p.active=bool(item.get("active",p.active)); p.featured=bool(item.get("featured",p.featured));
+            p.sort_order=item.get("sort_order",p.sort_order); p.image_url=item.get("image_url",p.image_url) or ""; p.card_label=item.get("card_label",p.card_label) or ""; p.price_label=item.get("price_label",p.price_label) or ""
+            if (p.name,p.active,p.featured,p.sort_order,p.image_url,p.card_label,p.price_label)!=old: updated+=1
+            for pi in item.get("plans",[]):
+                pl=db.session.get(Plan,pi.get("id")) if pi.get("id") else None
+                if not pl: continue
+                pl.name=pi.get("name",pl.name); pl.months=int(pi.get("months",pl.months)); pl.price=float(pi.get("price",pl.price)); pl.sale_price=pi.get("sale_price",pl.sale_price); pl.cost_price=float(pi.get("cost_price",pl.cost_price or 0)); pl.active=bool(pi.get("active",pl.active)); pl.sort_order=int(pi.get("sort_order",pl.sort_order))
+                changed.append(f"Plan #{pl.id}")
+            meta=item.get("meta")
+            if meta:
+                m=V21ProductMeta.query.filter_by(product_id=p.id).first()
+                if not m: m=V21ProductMeta(product_id=p.id); db.session.add(m)
+                for k in ["product_type","region","delivery","guarantee","receive_type","included_json","faq_json","badges_json","keywords","desc_i18n"]:
+                    if k in meta: setattr(m,k,meta[k])
+        db.session.commit()
+        audit("Catalog restored",f"Backup uploaded: +{added} products, updated {updated} products/plans")
+        db.session.commit()
+        flash(f"Catalog restored safely. Added {added}, updated {updated}. A pre-restore backup #{before.id} was created.")
+    except Exception as e:
+        db.session.rollback()
+        flash(f"Restore failed: {e}")
+    return redirect(url_for("admin_catalog"))
+
+@app.route("/admin/catalog/backup/<int:backup_id>/download")
+@login_required
+def admin_catalog_backup_download(backup_id):
+    if not _admin_only(): return ("Forbidden",403)
+    b=db.session.get(V21CatalogBackup,backup_id)
+    if not b:return ("Not found",404)
+    return Response(b.payload,mimetype="application/json",headers={"Content-Disposition":f"attachment; filename=veyra-catalog-backup-{b.id}.json"})
+
+@app.route("/admin/v21/ticket/<int:ticket_id>/status", methods=["POST"])
+@login_required
+def admin_v21_ticket_status(ticket_id):
+    if not _admin_only(): return ("Forbidden",403)
+    t=db.session.get(V21Ticket,ticket_id)
+    if not t:return ("Not found",404)
+    status=request.form.get("status","")
+    if status not in {"new","open","waiting","pending","resolved","closed"}: return ("Bad status",400)
+    t.status=status; db.session.commit()
+    v21_notify(t.user_id,"Support ticket update",f"Ticket #{t.id} is now {status}.","support"); db.session.commit()
+    return redirect(url_for("admin_v21_ticket",ticket_id=t.id))
+
