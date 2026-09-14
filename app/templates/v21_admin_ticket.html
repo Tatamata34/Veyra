@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block content %}
+<style>
+.admin-ticket-page{max-width:980px;margin:0 auto;padding:28px 18px 60px}.admin-ticket-card{border:1px solid rgba(120,130,160,.18);border-radius:22px;overflow:hidden;background:rgba(255,255,255,.7)}.admin-ticket-header{padding:22px;border-bottom:1px solid rgba(120,130,160,.15);display:flex;justify-content:space-between;gap:16px;align-items:flex-start}.admin-ticket-header h1{margin:5px 0}.admin-ticket-meta{display:flex;gap:8px;flex-wrap:wrap}.admin-ticket-meta span{padding:6px 10px;border-radius:999px;background:rgba(100,110,140,.08);font-size:12px}.admin-thread{padding:22px}.admin-msg{max-width:78%;margin:0 0 16px;padding:15px 17px;border-radius:18px;background:#f2f4f8}.admin-msg.admin{margin-left:auto;background:#eaf0ff}.admin-msg b{display:block}.admin-msg p{white-space:pre-wrap;margin:7px 0;line-height:1.55}.admin-msg small{opacity:.6}.admin-reply{padding:22px;border-top:1px solid rgba(120,130,160,.15)}.admin-reply textarea{width:100%;min-height:130px}.admin-reply-row{display:flex;justify-content:flex-end;gap:10px;margin-top:10px;align-items:center}.admin-reply-row select{max-width:180px}.backlink{display:inline-block;margin-bottom:14px}
+</style>
+<div class="admin-ticket-page">
+  <a class="backlink" href="/admin/v21">← Back to Support</a>
+  <div class="admin-ticket-card">
+    <header class="admin-ticket-header">
+      <div><span>SUPPORT TICKET #{{ticket.id}}</span><h1>{{ticket.subject}}</h1><div class="admin-ticket-meta"><span>@{{ticket.user.username}}</span><span>{{ticket.category}}</span>{% if ticket.order_id %}<span>Order #{{ticket.order_id}}</span>{% endif %}<span>{{ticket.status|upper}}</span></div></div>
+      <a class="v21-btn ghost" href="/v21/support/{{ticket.id}}">Customer view</a>
+    </header>
+    <div class="admin-thread">
+      {% for r in ticket.replies %}<div class="admin-msg {% if r.is_admin %}admin{% endif %}"><b>{% if r.is_admin %}🛡 VEYRA Support{% else %}👤 @{{r.user.username}}{% endif %}</b><p>{{r.message}}</p><small>{{r.created_at.strftime('%d.%m.%Y %H:%M')}}</small></div>{% endfor %}
+    </div>
+    <form class="admin-reply" method="post" action="/admin/v21/ticket/{{ticket.id}}/reply">
+      <input type="hidden" name="csrf_token" value="{{csrf_token}}">
+      <textarea name="message" placeholder="Write a reply to the customer..." required></textarea>
+      <div class="admin-reply-row"><select name="status"><option value="pending" {% if ticket.status=='pending' %}selected{% endif %}>Pending</option><option value="open" {% if ticket.status=='open' %}selected{% endif %}>Open</option><option value="resolved" {% if ticket.status=='resolved' %}selected{% endif %}>Resolved</option></select><button class="v21-btn primary">Send reply →</button></div>
+    </form>
+  </div>
+</div>
+{% endblock %}
