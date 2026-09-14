@@ -2797,27 +2797,65 @@ def v21_product(slug):
     return render_template("v21_product.html",product=p,meta=meta,included=included,faq=faq,plans=plans,reviews=reviews,saved=saved,recent=v21_recent())
 
 def v21_account():
-    subs=Subscription.query.filter_by(user_id=current_user.id).order_by(Subscription.expires_at.asc()).all();changed=False
+    """Safe read-only customer dashboard.
+    GET /account must never fail because notification generation or a stale
+    subscription/order record should not be able to break the dashboard.
+    Notifications are created by their dedicated flows instead.
+    """
+    try:
+        subs = Subscription.query.filter_by(user_id=current_user.id).order_by(Subscription.expires_at.asc()).all()
+    except Exception:
+        subs = []
+
+    # Keep subscription status current in memory; commit only when there is a
+    # real status change and never let that prevent the dashboard from loading.
+    changed = False
+    now = datetime.utcnow()
     for s in subs:
-        old=s.active;s.active=(s.expires_at>datetime.utcnow())
-        if old and not s.active:v21_notify(current_user.id,"Subscription expired",f"{s.product.name} has expired.","subscription");changed=True
-        elif s.active and (s.expires_at-datetime.utcnow()).days<=7 and old:
-            exists=V21Notification.query.filter_by(user_id=current_user.id,kind="expiration").filter(V21Notification.body.like(f"%{s.product.name}%")).first()
-            if not exists:v21_notify(current_user.id,"Subscription expiring soon",f"{s.product.name} expires on {s.expires_at.strftime('%d.%m.%Y')}.","expiration");changed=True
-    if changed:db.session.commit()
-    orders=Order.query.filter_by(user_id=current_user.id).order_by(Order.created_at.desc()).all()
-    for o in orders[:20]:
-        label = o.plan.product.name if o.plan else (o.bundle.name if o.bundle else "Order")
-        if not V21Notification.query.filter_by(user_id=current_user.id,kind="order").filter(V21Notification.body.like(f"%{public_order_ref(o)}%")).first():
-            v21_notify(current_user.id,"Order update",f"{public_order_ref(o)} · {label} · {o.status}","order")
-        if o.delivery and not V21Notification.query.filter_by(user_id=current_user.id,kind="delivery").filter(V21Notification.body.like(f"%{public_order_ref(o)}%")).first():
-            v21_notify(current_user.id,"Delivery ready",f"{public_order_ref(o)} is ready in your account.","delivery")
-    active_deals=V21Deal.query.filter_by(active=True).count()
-    if active_deals and not V21Notification.query.filter_by(user_id=current_user.id,kind="deal").first():
-        v21_notify(current_user.id,"New deals available",f"There are {active_deals} active deals to explore.","deal")
-    db.session.commit()
-    wishlist=Wishlist.query.filter_by(user_id=current_user.id).all();tickets=V21Ticket.query.filter_by(user_id=current_user.id).order_by(V21Ticket.updated_at.desc()).limit(5).all();notes=V21Notification.query.filter_by(user_id=current_user.id).order_by(V21Notification.created_at.desc()).limit(6).all();points=sum(x.points for x in LoyaltyPoint.query.filter_by(user_id=current_user.id).all())
-    return render_template("v21_account.html",subs=subs,orders=orders,wishlist=wishlist,tickets=tickets,notifications=notes,points=points,recent=v21_recent())
+        try:
+            new_active = bool(s.expires_at and s.expires_at > now)
+            if s.active != new_active:
+                s.active = new_active
+                changed = True
+        except Exception:
+            pass
+    if changed:
+        try:
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+
+    try:
+        orders = Order.query.filter_by(user_id=current_user.id).order_by(Order.created_at.desc()).all()
+    except Exception:
+        orders = []
+    try:
+        wishlist = Wishlist.query.filter_by(user_id=current_user.id).order_by(Wishlist.id.desc()).all()
+    except Exception:
+        wishlist = []
+    try:
+        tickets = V21Ticket.query.filter_by(user_id=current_user.id).order_by(V21Ticket.updated_at.desc()).limit(5).all()
+    except Exception:
+        tickets = []
+    try:
+        notes = V21Notification.query.filter_by(user_id=current_user.id).order_by(V21Notification.created_at.desc()).limit(6).all()
+    except Exception:
+        notes = []
+    try:
+        points = sum(x.points or 0 for x in LoyaltyPoint.query.filter_by(user_id=current_user.id).all())
+    except Exception:
+        points = 0
+
+    return render_template(
+        "v21_account.html",
+        subs=subs,
+        orders=orders,
+        wishlist=wishlist,
+        tickets=tickets,
+        notifications=notes,
+        points=points,
+        active_count=sum(1 for s in subs if getattr(s, "active", False)),
+    )
 
 def v21_wishlist_page():
     items=Wishlist.query.filter_by(user_id=current_user.id).order_by(Wishlist.id.desc()).all();return render_template("v21_wishlist.html",items=items)
