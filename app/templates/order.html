@@ -5,22 +5,32 @@
     <div class="eyebrow">Veyra</div>
     <h1>{{ tr("Order created") }}</h1>
     <p class="lead">{{ tr("Your order is ready. Contact us on WhatsApp to complete it.") }}</p>
+
     <div class="card" style="padding:28px;margin:28px 0;">
       <h2>#{{ order.id }}</h2>
-      <p>{% if order.plan %}{{ order.plan.product.name }} · {{ order.plan.name }}{% else %}{{ order.bundle.name }}{% endif %}</p>
+
+      <p>
+        {% if order.plan %}
+          {{ order.plan.product.name }} · {{ order.plan.name }}
+        {% else %}
+          {{ order.bundle.name }}
+        {% endif %}
+      </p>
+
       <strong>€{{ "%.2f"|format(order.sale_price) }}</strong>
-      {% if not wa %}<p class="muted">WhatsApp is not configured yet. Add the support WhatsApp number in Admin → Settings.</p>{% endif %}
-      {% if payment_unavailable %}<p class="muted">Stripe is not ready yet. Add STRIPE_SECRET_KEY in Railway Variables, or use WhatsApp.</p>{% endif %}
-      {% if wa %}<p class="muted">WhatsApp: {{ wa|replace("https://wa.me/", "+")|truncate(28, True, "...") }}</p>{% endif %}
     </div>
+
     <div style="display:flex;gap:12px;flex-wrap:wrap;">
-      {% if not payment_unavailable and payment_provider == "stripe" %}
-        <a class="btn btn-primary" href="{{ url_for('payment', order_id=order.id) }}">{{ tr("Pay securely") }} →</a>
-      {% endif %}
-      {% if wa %}
-        <a class="btn btn-primary" href="https://wa.me/{{ wa|replace('+','')|replace('https://wa.me/','')|replace(' ','') }}" target="_blank" rel="noopener">{{ tr("Open WhatsApp") }} →</a>
-      {% endif %}
-      <a class="btn" href="{{ url_for('account') }}">{{ tr("Go to account") }}</a>
+      <a class="btn btn-primary"
+         href="https://api.whatsapp.com/send?phone=14242165211"
+         target="_blank"
+         rel="noopener noreferrer">
+        {{ tr("Open WhatsApp") }} →
+      </a>
+
+      <a class="btn" href="{{ url_for('account') }}">
+        {{ tr("Go to account") }}
+      </a>
     </div>
   </div>
 </section>
