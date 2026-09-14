@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="v21-admin v21-ticket-center">
+  <div class="v21-dhead">
+    <div><span>VEYRA SUPPORT CENTER</span><h1>Tickets</h1><p>All customer support requests in one place.</p></div>
+    <div style="display:flex;gap:10px"><a class="v21-btn ghost" href="/admin/v21">← Admin</a><a class="v21-btn ghost" href="/admin/catalog">🔒 Product Catalog</a></div>
+  </div>
+  <div class="v21-ticket-tabs"><b>All {{ tickets|length }}</b><b class="new">🔴 New {{ new_count }}</b><b>Open / Pending</b><b>Resolved</b></div>
+  <section class="v21-panel">
+    {% for t in tickets %}
+    <a class="v21-ticket-list-row {% if t.status=='new' %}is-new{% endif %}" href="/admin/v21/ticket/{{t.id}}">
+      <div class="ticket-avatar">{{ t.user.username[:1]|upper }}</div>
+      <div class="ticket-main"><b>#{{t.id}} · {{t.subject}}</b><small>@{{t.user.username}} · {{t.category}}{% if t.order_id %} · Order #{{t.order_id}}{% endif %}</small></div>
+      <div class="ticket-right"><span class="ticket-status {{t.status}}">{{t.status}}</span><small>{{t.updated_at.strftime('%d.%m.%Y %H:%M') if t.updated_at else ''}}</small></div>
+      <strong>→</strong>
+    </a>
+    {% else %}<p class="muted">No support tickets yet.</p>{% endfor %}
+  </section>
+</div>
+<style>
+.v21-ticket-center{max-width:1180px;margin:auto}.v21-ticket-tabs{display:flex;gap:10px;flex-wrap:wrap;margin:14px 0}.v21-ticket-tabs b{padding:10px 14px;border:1px solid #dfe5f1;border-radius:12px;background:#fff}.v21-ticket-tabs .new{color:#b42318}.v21-ticket-list-row{display:flex;align-items:center;gap:14px;padding:16px;border:1px solid #e5e9f2;border-radius:16px;margin-bottom:10px;text-decoration:none;color:inherit;background:#fff}.v21-ticket-list-row.is-new{border-color:#ffb4ab;background:#fffafa}.ticket-avatar{width:42px;height:42px;border-radius:13px;display:grid;place-items:center;background:#eef2ff;font-weight:800}.ticket-main{flex:1;min-width:0}.ticket-main b,.ticket-main small{display:block}.ticket-main small,.ticket-right small{color:#7b8498;margin-top:4px}.ticket-right{text-align:right}.ticket-status{padding:6px 10px;border-radius:999px;font-size:12px;font-weight:800;text-transform:uppercase}.ticket-status.new{background:#ffe4e1;color:#b42318}.ticket-status.open{background:#e7f0ff;color:#175cd3}.ticket-status.pending{background:#fff0d5;color:#b54708}.ticket-status.resolved{background:#dcfae6;color:#067647}
+</style>
+{% endblock %}
