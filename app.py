@@ -3006,44 +3006,157 @@ def admin_catalog_restore():
     f=request.files.get("backup")
     if not f or not f.filename.lower().endswith(".json"):
         flash("Upload a Veyra JSON catalog backup."); return redirect(url_for("admin_catalog"))
-    try:
-        data=json.loads(f.read().decode("utf-8"))
-        products=data.get("products") if isinstance(data,dict) else None
-        if not isinstance(products,list): raise ValueError("Invalid catalog format")
-        before=v21_save_catalog_backup("Before restore", "pre-restore")
-        changed=[]; added=0; updated=0
+
+    def _normalise_catalog_json(raw):
+        """Accept both the current wrapper format and the old raw-list format."""
+        if isinstance(raw, list):
+            products = raw
+        elif isinstance(raw, dict):
+            products = raw.get("products")
+            if products is None and isinstance(raw.get("catalog"), dict):
+                products = raw["catalog"].get("products")
+        else:
+            products = None
+        if not isinstance(products, list):
+            raise ValueError('Invalid catalog format. Expected a Veyra backup object with a "products" array, or a product array [...].')
+        clean=[]
         for item in products:
-            pid=item.get("id"); p=db.session.get(Product,pid) if pid else None
+            if not isinstance(item, dict) or not (item.get("id") or item.get("slug") or item.get("name")):
+                continue
+            plans=item.get("plans")
+            if not isinstance(plans, list): plans=[]
+            item=dict(item); item["plans"]=[x for x in plans if isinstance(x,dict)]
+            clean.append(item)
+        if not clean and products:
+            raise ValueError("Catalog contains no valid products.")
+        return clean
+
+    def _delete_orders_for_plan_ids(plan_ids):
+        if not plan_ids: return
+        order_ids=[x.id for x in Order.query.filter(Order.plan_id.in_(plan_ids)).all()]
+        if order_ids:
+            # Tickets keep their conversation, but must not retain a deleted order FK.
+            if "V21Ticket" in globals():
+                V21Ticket.query.filter(V21Ticket.order_id.in_(order_ids)).update({V21Ticket.order_id: None}, synchronize_session=False)
+            OrderDelivery.query.filter(OrderDelivery.order_id.in_(order_ids)).delete(synchronize_session=False)
+            Subscription.query.filter(Subscription.order_id.in_(order_ids)).delete(synchronize_session=False)
+            CouponUsage.query.filter(CouponUsage.order_id.in_(order_ids)).delete(synchronize_session=False)
+            Order.query.filter(Order.id.in_(order_ids)).delete(synchronize_session=False)
+
+    def _delete_plan_ids(plan_ids):
+        if not plan_ids: return
+        _delete_orders_for_plan_ids(plan_ids)
+        if "V21DealItem" in globals():
+            deal_ids=[x.deal_id for x in V21DealItem.query.filter(V21DealItem.plan_id.in_(plan_ids)).all()]
+            V21DealItem.query.filter(V21DealItem.plan_id.in_(plan_ids)).delete(synchronize_session=False)
+            for did in set(deal_ids):
+                d=db.session.get(V21Deal,did) if "V21Deal" in globals() else None
+                if d and not V21DealItem.query.filter_by(deal_id=did).first():
+                    db.session.delete(d)
+        BundleItem.query.filter(BundleItem.plan_id.in_(plan_ids)).delete(synchronize_session=False)
+        Subscription.query.filter(Subscription.plan_id.in_(plan_ids)).delete(synchronize_session=False)
+        db.session.execute(db.delete(Plan).where(Plan.id.in_(plan_ids)))
+
+    def _delete_product_for_restore(prod):
+        plan_ids=[x.id for x in prod.plans]
+        _delete_plan_ids(plan_ids)
+        Review.query.filter_by(product_id=prod.id).delete(synchronize_session=False)
+        Wishlist.query.filter_by(product_id=prod.id).delete(synchronize_session=False)
+        if "V21ProductMeta" in globals(): V21ProductMeta.query.filter_by(product_id=prod.id).delete(synchronize_session=False)
+        if "V21RecentlyViewed" in globals(): V21RecentlyViewed.query.filter_by(product_id=prod.id).delete(synchronize_session=False)
+        if "V21CouponRule" in globals(): V21CouponRule.query.filter_by(product_id=prod.id).delete(synchronize_session=False)
+        db.session.delete(prod)
+
+    try:
+        raw=json.loads(f.read().decode("utf-8-sig"))
+        products=_normalise_catalog_json(raw)
+
+        # Always snapshot the LIVE state before a restore. This makes the restore reversible.
+        before=v21_save_catalog_backup("Before restore", "pre-restore")
+
+        backup_ids={int(x["id"]) for x in products if str(x.get("id","")).isdigit()}
+        backup_slugs={str(x.get("slug")).strip().lower() for x in products if x.get("slug")}
+        current=Product.query.order_by(Product.id.asc()).all()
+        removed=[]; updated=0; added=0; plans_added=0; plans_removed=0
+
+        # IMPORTANT: restore means the catalog becomes the backup catalog.
+        # Products that exist NOW but are absent from the backup are removed.
+        # Orders/customers are not touched unless a removed product/plan has dependent orders;
+        # in that case the same safe dependency cleanup used by permanent product deletion runs.
+        for p in current:
+            if p.id not in backup_ids and (p.slug or "").strip().lower() not in backup_slugs:
+                removed.append(p.name)
+                _delete_product_for_restore(p)
+        db.session.flush()
+
+        for item in products:
+            pid=item.get("id")
+            p=db.session.get(Product, int(pid)) if str(pid).isdigit() else None
+            slug=(item.get("slug") or make_slug(item.get("name","product"))).strip()
             if not p:
-                slug=item.get("slug") or make_slug(item.get("name","product"))
-                if Product.query.filter_by(slug=slug).first():
-                    # Never create a duplicate silently.
-                    continue
+                p=Product.query.filter_by(slug=slug).first()
+            if not p:
                 cat=db.session.get(Category,item.get("category_id"))
                 if not cat and item.get("category"):
                     cat=Category.query.filter_by(name=item["category"]).first()
-                if not cat: continue
+                if not cat:
+                    raise ValueError(f'Category not found for product "{item.get("name","Product")}"')
                 p=Product(name=item.get("name") or "Product",slug=slug,category_id=cat.id)
                 db.session.add(p); db.session.flush(); added+=1
-            old=(p.name,p.active,p.featured,p.sort_order,p.image_url,p.card_label,p.price_label)
-            p.name=item.get("name",p.name); p.active=bool(item.get("active",p.active)); p.featured=bool(item.get("featured",p.featured));
-            p.sort_order=item.get("sort_order",p.sort_order); p.image_url=item.get("image_url",p.image_url) or ""; p.card_label=item.get("card_label",p.card_label) or ""; p.price_label=item.get("price_label",p.price_label) or ""
-            if (p.name,p.active,p.featured,p.sort_order,p.image_url,p.card_label,p.price_label)!=old: updated+=1
+            old=(p.name,p.slug,p.category_id,p.active,p.featured,p.sort_order,p.image_url,p.card_label,p.price_label)
+            p.name=item.get("name",p.name); p.slug=slug
+            if item.get("category_id") is not None:
+                cat=db.session.get(Category,int(item["category_id"]))
+                if cat: p.category_id=cat.id
+            elif item.get("category"):
+                cat=Category.query.filter_by(name=item["category"]).first()
+                if cat: p.category_id=cat.id
+            p.active=bool(item.get("active",p.active)); p.featured=bool(item.get("featured",p.featured))
+            p.sort_order=int(item.get("sort_order",p.sort_order or 0)); p.image_url=item.get("image_url",p.image_url) or ""
+            p.card_label=item.get("card_label",p.card_label) or ""; p.price_label=item.get("price_label",p.price_label) or "month"
+            if (p.name,p.slug,p.category_id,p.active,p.featured,p.sort_order,p.image_url,p.card_label,p.price_label)!=old: updated+=1
+
+            restored_plan_ids=set()
             for pi in item.get("plans",[]):
-                pl=db.session.get(Plan,pi.get("id")) if pi.get("id") else None
-                if not pl: continue
-                pl.name=pi.get("name",pl.name); pl.months=int(pi.get("months",pl.months)); pl.price=float(pi.get("price",pl.price)); pl.sale_price=pi.get("sale_price",pl.sale_price); pl.cost_price=float(pi.get("cost_price",pl.cost_price or 0)); pl.active=bool(pi.get("active",pl.active)); pl.sort_order=int(pi.get("sort_order",pl.sort_order))
-                changed.append(f"Plan #{pl.id}")
+                if pi.get("id") is None: continue
+                try: plid=int(pi["id"])
+                except (TypeError,ValueError): continue
+                pl=db.session.get(Plan,plid)
+                # Never attach a plan belonging to another product to this product.
+                if pl and pl.product_id != p.id:
+                    pl=None
+                if not pl:
+                    pl=Plan.query.filter_by(product_id=p.id,name=pi.get("name") or "Plan").first()
+                if not pl:
+                    pl=Plan(product_id=p.id,name=pi.get("name") or "Plan",months=int(pi.get("months",1) or 1),price=float(pi.get("price",0) or 0),sale_price=pi.get("sale_price"),cost_price=float(pi.get("cost_price",0) or 0),active=bool(pi.get("active",True)),sort_order=int(pi.get("sort_order",0) or 0))
+                    db.session.add(pl); db.session.flush(); plans_added+=1
+                else:
+                    pl.product_id=p.id
+                    pl.name=pi.get("name",pl.name); pl.months=int(pi.get("months",pl.months) or 1); pl.price=float(pi.get("price",pl.price) or 0)
+                    pl.sale_price=pi.get("sale_price",pl.sale_price); pl.cost_price=float(pi.get("cost_price",pl.cost_price or 0) or 0)
+                    pl.active=bool(pi.get("active",pl.active)); pl.sort_order=int(pi.get("sort_order",pl.sort_order) or 0)
+                if pl.id is not None:
+                    restored_plan_ids.add(pl.id)
+
+            # Remove plans that were added after this backup and are not in the backup.
+            stale=[pl.id for pl in list(p.plans) if pl.id not in restored_plan_ids and pl.id is not None]
+            if stale:
+                plans_removed += len(stale)
+                _delete_plan_ids(stale)
+
             meta=item.get("meta")
             if meta:
                 m=V21ProductMeta.query.filter_by(product_id=p.id).first()
                 if not m: m=V21ProductMeta(product_id=p.id); db.session.add(m)
                 for k in ["product_type","region","delivery","guarantee","receive_type","included_json","faq_json","badges_json","keywords","desc_i18n"]:
                     if k in meta: setattr(m,k,meta[k])
+
         db.session.commit()
-        audit("Catalog restored",f"Backup uploaded: +{added} products, updated {updated} products/plans")
+        audit("Catalog restored", f"Exact catalog rollback: +{added} products, removed {len(removed)} products, updated {updated} products, +{plans_added} plans, removed {plans_removed} plans")
         db.session.commit()
-        flash(f"Catalog restored safely. Added {added}, updated {updated}. A pre-restore backup #{before.id} was created.")
+        removed_txt = ", ".join(removed[:5]) + ("…" if len(removed)>5 else "")
+        extra = f" Removed: {removed_txt}." if removed else ""
+        flash(f"Catalog restored successfully. Added {added}, updated {updated}, removed {len(removed)} products, removed {plans_removed} plans.{extra} Pre-restore backup #{before.id} created.")
     except Exception as e:
         db.session.rollback()
         flash(f"Restore failed: {e}")
