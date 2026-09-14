@@ -2600,10 +2600,16 @@ def v21_badges(product, plan=None):
 
 def v21_expiry(sub):
     now = datetime.utcnow()
-    if sub.expires_at <= now:
-        sub.active = False; return 0, "expired"
-    days = max(0, (sub.expires_at-now).days)
-    return days, "soon" if days <= 7 else "active"
+    try:
+        if not sub.expires_at:
+            return 0, "expired"
+        if sub.expires_at <= now:
+            sub.active = False
+            return 0, "expired"
+        days = max(0, (sub.expires_at-now).days)
+        return days, "soon" if days <= 7 else "active"
+    except Exception:
+        return 0, "expired"
 
 def v21_touch(product):
     key = session.get("v21_rv")
@@ -2645,7 +2651,16 @@ def v21_payment_methods():
 
 @app.context_processor
 def v21_context():
-    unread = V21Notification.query.filter_by(user_id=current_user.id, read=False).count() if current_user.is_authenticated else 0
+    # Never let the global V21 notification counter break every page.
+    # This is especially important during first deploys or when the additive
+    # V21 tables have not been created yet.
+    unread = 0
+    if current_user.is_authenticated:
+        try:
+            unread = V21Notification.query.filter_by(user_id=current_user.id, read=False).count()
+        except Exception:
+            db.session.rollback()
+            unread = 0
     return {"v21_tr": v21_tr, "v21_json": v21_json, "v21_billing": v21_billing, "v21_meta": v21_meta, "v21_discount": v21_discount, "v21_badges": v21_badges, "v21_unread": unread}
 
 # New storefront endpoints are separate so legacy payment/order URLs remain untouched.
