@@ -1,23 +1,15 @@
 {% extends "base.html" %}
 {% block content %}
-<style>
-.admin-ticket-page{max-width:980px;margin:0 auto;padding:28px 18px 60px}.admin-ticket-card{border:1px solid rgba(120,130,160,.18);border-radius:22px;overflow:hidden;background:rgba(255,255,255,.7)}.admin-ticket-header{padding:22px;border-bottom:1px solid rgba(120,130,160,.15);display:flex;justify-content:space-between;gap:16px;align-items:flex-start}.admin-ticket-header h1{margin:5px 0}.admin-ticket-meta{display:flex;gap:8px;flex-wrap:wrap}.admin-ticket-meta span{padding:6px 10px;border-radius:999px;background:rgba(100,110,140,.08);font-size:12px}.admin-thread{padding:22px}.admin-msg{max-width:78%;margin:0 0 16px;padding:15px 17px;border-radius:18px;background:#f2f4f8}.admin-msg.admin{margin-left:auto;background:#eaf0ff}.admin-msg b{display:block}.admin-msg p{white-space:pre-wrap;margin:7px 0;line-height:1.55}.admin-msg small{opacity:.6}.admin-reply{padding:22px;border-top:1px solid rgba(120,130,160,.15)}.admin-reply textarea{width:100%;min-height:130px}.admin-reply-row{display:flex;justify-content:flex-end;gap:10px;margin-top:10px;align-items:center}.admin-reply-row select{max-width:180px}.backlink{display:inline-block;margin-bottom:14px}
-</style>
-<div class="admin-ticket-page">
-  <a class="backlink" href="/admin/v21">← Back to Support</a>
-  <div class="admin-ticket-card">
-    <header class="admin-ticket-header">
-      <div><span>SUPPORT TICKET #{{ticket.id}}</span><h1>{{ticket.subject}}</h1><div class="admin-ticket-meta"><span>@{{ticket.user.username}}</span><span>{{ticket.category}}</span>{% if ticket.order_id %}<span>Order #{{ticket.order_id}}</span>{% endif %}<span>{{ticket.status|upper}}</span></div></div>
-      <a class="v21-btn ghost" href="/v21/support/{{ticket.id}}">Customer view</a>
-    </header>
-    <div class="admin-thread">
-      {% for r in ticket.replies %}<div class="admin-msg {% if r.is_admin %}admin{% endif %}"><b>{% if r.is_admin %}🛡 VEYRA Support{% else %}👤 @{{r.user.username}}{% endif %}</b><p>{{r.message}}</p><small>{{r.created_at.strftime('%d.%m.%Y %H:%M')}}</small></div>{% endfor %}
-    </div>
-    <form class="admin-reply" method="post" action="/admin/v21/ticket/{{ticket.id}}/reply">
-      <input type="hidden" name="csrf_token" value="{{csrf_token}}">
-      <textarea name="message" placeholder="Write a reply to the customer..." required></textarea>
-      <div class="admin-reply-row"><select name="status"><option value="pending" {% if ticket.status=='pending' %}selected{% endif %}>Pending</option><option value="open" {% if ticket.status=='open' %}selected{% endif %}>Open</option><option value="resolved" {% if ticket.status=='resolved' %}selected{% endif %}>Resolved</option></select><button class="v21-btn primary">Send reply →</button></div>
-    </form>
-  </div>
+<div class="v21-admin ticket-detail-page">
+  <div class="v21-dhead"><div><span>SUPPORT · TICKET #{{ticket.id}}</span><h1>{{ticket.subject}}</h1><p>@{{ticket.user.username}} · {{ticket.category}}{% if ticket.order_id %} · Order #{{ticket.order_id}}{% endif %}</p></div><a class="v21-btn ghost" href="/admin/v21/tickets">← All tickets</a></div>
+  <section class="ticket-chat">
+    {% for r in ticket.replies %}
+    <div class="ticket-bubble {% if r.is_admin %}admin{% else %}customer{% endif %}"><div class="bubble-head"><b>{% if r.is_admin %}🛡 VEYRA Support{% else %}👤 @{{r.user.username if r.user else ticket.user.username}}{% endif %}</b><small>{{r.created_at.strftime('%d.%m.%Y %H:%M') if r.created_at else ''}}</small></div><div class="bubble-body">{{r.message}}</div></div>
+    {% endfor %}
+  </section>
+  <section class="v21-panel reply-panel"><form method="post"><input type="hidden" name="csrf_token" value="{{csrf_token}}"><textarea name="message" rows="6" placeholder="Write a reply to the customer..."></textarea><div class="reply-actions"><select name="status"><option value="pending" {% if ticket.status=='pending' %}selected{% endif %}>Pending</option><option value="open" {% if ticket.status=='open' %}selected{% endif %}>Open</option><option value="resolved" {% if ticket.status=='resolved' %}selected{% endif %}>Resolved</option></select><button class="v21-btn primary">✈ Send Reply</button></div></form></section>
 </div>
+<style>
+.ticket-detail-page{max-width:1000px;margin:auto}.ticket-chat{display:flex;flex-direction:column;gap:12px;margin:18px 0}.ticket-bubble{max-width:78%;padding:16px 18px;border-radius:18px;background:#fff;border:1px solid #e2e7f0;box-shadow:0 4px 18px rgba(20,30,60,.04)}.ticket-bubble.customer{align-self:flex-start}.ticket-bubble.admin{align-self:flex-end;background:#f0f4ff;border-color:#dbe3ff}.bubble-head{display:flex;justify-content:space-between;gap:20px;font-size:13px}.bubble-head small{color:#7b8498}.bubble-body{white-space:pre-wrap;margin-top:10px;line-height:1.6}.reply-panel textarea{width:100%;box-sizing:border-box;border:1px solid #d9dfeb;border-radius:14px;padding:14px;resize:vertical}.reply-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:10px}.reply-actions select{border:1px solid #d9dfeb;border-radius:12px;padding:10px 14px}
+</style>
 {% endblock %}
