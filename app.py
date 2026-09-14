@@ -1760,6 +1760,8 @@ def admin_orders_reset():
     delivery_count = OrderDelivery.query.delete(synchronize_session=False)
     subscription_count = Subscription.query.delete(synchronize_session=False)
     coupon_usage_count = CouponUsage.query.delete(synchronize_session=False)
+    if "V21Ticket" in globals():
+        V21Ticket.query.update({"order_id": None}, synchronize_session=False)
     order_count = Order.query.delete(synchronize_session=False)
     # Test purchase rewards are transactional too; keep customers/products/settings intact.
     loyalty_count = LoyaltyPoint.query.delete(synchronize_session=False)
@@ -1780,6 +1782,8 @@ def admin_order_delete(order_id):
     OrderDelivery.query.filter_by(order_id=o.id).delete(synchronize_session=False)
     Subscription.query.filter_by(order_id=o.id).delete(synchronize_session=False)
     CouponUsage.query.filter_by(order_id=o.id).delete(synchronize_session=False)
+    if "V21Ticket" in globals():
+        V21Ticket.query.filter_by(order_id=o.id).update({"order_id": None}, synchronize_session=False)
     db.session.delete(o)
     db.session.commit()
     audit("Order deleted", public_label)
@@ -2557,6 +2561,10 @@ _V21_UI = {
     "fr": {"Control center":"Centre de contrôle","Manage your store faster":"Gérez votre boutique plus rapidement","Search products":"Rechercher des produits","Collapse all":"Tout réduire","Expand all":"Tout développer","Product settings":"Paramètres du produit","Save product":"Enregistrer le produit","Delete permanently":"Supprimer définitivement","Save plan":"Enregistrer le plan","Delete plan":"Supprimer le plan","Available":"Disponible","Unavailable":"Indisponible","What you receive":"Ce que vous recevez","WHAT YOU RECEIVE":"CE QUE VOUS RECEVEZ","Everything you need":"Tout ce dont vous avez besoin","Questions":"Questions","Order history":"Historique des commandes","Need help?":"Besoin d'aide ?","Create a ticket if you need help.":"Créez un ticket si vous avez besoin d'aide.","Future checkout methods":"Futurs moyens de paiement","What customers see":"Ce que voient les clients","Create a deal from existing plans":"Créer une offre à partir des plans existants","Scope existing coupons":"Appliquer les coupons existants","Customer tickets":"Tickets clients","Reply to customer":"Répondre au client","Deal name":"Nom de l'offre","Description":"Description","Start":"Début","End":"Fin","Reply":"Répondre","This is shown before checkout so you know exactly what you are buying.":"Ceci est affiché avant le paiement pour que vous sachiez exactement ce que vous achetez.","Secure checkout":"Paiement sécurisé","products ready to explore":"produits à découvrir","Choose your service, compare plans and see exactly what you receive.":"Choisissez votre service, comparez les plans et voyez exactement ce que vous recevez.","Clear plans and prices.":"Plans et prix clairs.","No hidden price before checkout.":"Aucun prix caché avant le paiement.","Orders, subscriptions and wishlist.":"Commandes, abonnements et favoris.","Tickets when you need help.":"Tickets lorsque vous avez besoin d'aide."},
     "sq": {"Control center":"Qendra e kontrollit","Manage your store faster":"Menaxho dyqanin më shpejt","Search products":"Kërko produkte","Collapse all":"Mbyll të gjitha","Expand all":"Hap të gjitha","Product settings":"Cilësimet e produktit","Save product":"Ruaj produktin","Delete permanently":"Fshije përgjithmonë","Save plan":"Ruaj planin","Delete plan":"Fshi planin","Available":"Në dispozicion","Unavailable":"Nuk është në dispozicion","What you receive":"Çfarë merr","WHAT YOU RECEIVE":"ÇFARË MERR","Everything you need":"Gjithçka që të duhet","Questions":"Pyetje","Order history":"Historiku i porosive","Need help?":"Ke nevojë për ndihmë?","Create a ticket if you need help.":"Krijo një tiketë nëse ke nevojë për ndihmë.","Future checkout methods":"Metodat e ardhshme të pagesës","What customers see":"Çfarë shohin klientët","Create a deal from existing plans":"Krijo ofertë nga planet ekzistuese","Scope existing coupons":"Përcakto kuponët ekzistues","Customer tickets":"Tiketa të klientëve","Reply to customer":"Përgjigju klientit","Deal name":"Emri i ofertës","Description":"Përshkrimi","Start":"Fillimi","End":"Fundi","Reply":"Përgjigju","This is shown before checkout so you know exactly what you are buying.":"Kjo shfaqet para pagesës që ta dish saktë çfarë po blen.","Secure checkout":"Pagesë e sigurt","products ready to explore":"produkte për t'u parë","Choose your service, compare plans and see exactly what you receive.":"Zgjidh shërbimin, krahaso planet dhe shiko saktë çfarë merr.","Clear plans and prices.":"Plane dhe çmime të qarta.","No hidden price before checkout.":"Pa çmime të fshehura para pagesës.","Orders, subscriptions and wishlist.":"Porosi, abonime dhe lista e dëshirave.","Tickets when you need help.":"Tiketa kur të duhet ndihmë."}
 }
+_V21_UI["en"].update({"Tickets":"Tickets","Product Catalog":"Product Catalog","Support Tickets":"Support Tickets","new tickets":"new tickets","Protected product & pricing data":"Protected product & pricing data","Smart digital shop":"SMART DIGITAL SHOP"})
+_V21_UI["de"].update({"Tickets":"Tickets","Product Catalog":"Produktkatalog","Support Tickets":"Support-Tickets","new tickets":"neue Tickets","Protected product & pricing data":"Geschützte Produkt- und Preisdaten","Smart digital shop":"SMARTER DIGITALER SHOP"})
+_V21_UI["fr"].update({"Tickets":"Tickets","Product Catalog":"Catalogue produits","Support Tickets":"Tickets support","new tickets":"nouveaux tickets","Protected product & pricing data":"Données produits et prix protégées","Smart digital shop":"BOUTIQUE DIGITALE"})
+_V21_UI["sq"].update({"Tickets":"Tiketa","Product Catalog":"Katalogu i produkteve","Support Tickets":"Tiketa të mbështetjes","new tickets":"tiketa të reja","Protected product & pricing data":"Të dhënat e produkteve dhe çmimeve të mbrojtura","Smart digital shop":"DYQAN DIGJITAL I MENÇUR"})
 for _l,_vals in _V21_UI.items(): V21_LANG[_l].update(_vals)
 
 def v21_tr(text):
@@ -2647,7 +2655,7 @@ def v21_payment_methods():
 @app.context_processor
 def v21_context():
     unread = V21Notification.query.filter_by(user_id=current_user.id, read=False).count() if current_user.is_authenticated else 0
-    return {"v21_tr": v21_tr, "v21_json": v21_json, "v21_billing": v21_billing, "v21_meta": v21_meta, "v21_discount": v21_discount, "v21_badges": v21_badges, "v21_unread": unread}
+    return {"v21_tr": v21_tr, "v21_json": v21_json, "v21_billing": v21_billing, "v21_meta": v21_meta, "v21_discount": v21_discount, "v21_badges": v21_badges, "v21_expiry": v21_expiry, "v21_unread": unread}
 
 # New storefront endpoints are separate so legacy payment/order URLs remain untouched.
 @app.route("/v21/search")
