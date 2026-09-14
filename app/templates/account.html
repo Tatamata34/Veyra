@@ -1,1 +1,89 @@
-{% extends "base.html" %}{% block content %}<div class="account-wrap"><span class="eyebrow">{{tr('Customer account')}}</span><h1>{{tr('Welcome back')}} @{{current_user.username}}</h1><div class="account-grid"><section class="panel"><h2>{{tr('Active subscriptions')}}</h2>{% for s in subs %}<div class="row-card"><div><b>{{s.product.name}}</b><small class="muted">{{tr('Expires')}} {{s.expires_at.strftime('%d.%m.%Y %H:%M')}}</small></div><span class="status live">{{tr('Active')}}</span></div>{% else %}<p class="muted">{{tr('No subscriptions yet.')}}</p>{% endfor %}</section><section class="panel"><h2>📲 Telegram</h2>{% if current_user.telegram_id %}<div class="row-card"><div><b>Connected</b><small class="muted">Telegram ID: {{current_user.telegram_id}}</small></div><span class="status live">ON</span></div>{% else %}<p class="muted">Connect Telegram to receive completed deliveries directly.</p><form method="post" action="/account/telegram-link"><button class="nav-cta">Generate Telegram link</button></form>{% if telegram_url %}<div class="delivery-box" style="margin-top:12px"><b>1. Open Telegram</b><br><a class="soft-btn" href="{{telegram_url}}" target="_blank" rel="noopener" style="display:inline-block;margin-top:8px">💬 Open @veyra2026_bot</a><br><small class="muted" style="display:block;margin-top:10px">2. If Telegram does not open the command automatically, send:</small><code>/link {{telegram_link.token}}</code><small class="muted" style="display:block;margin-top:8px">3. Your account will connect automatically. Code expires in 15 minutes.</small></div>{% endif %}{% endif %}</section><section class="panel"><h2>{{tr('Rewards')}}</h2><div style="font-size:34px;font-weight:800">{{points}}</div><p class="muted">{{tr('Loyalty points')}}</p>{% if referral %}<div class="row-card"><div><b>{{tr('My referral link')}}</b><small class="muted">{{request.host_url}}ref/{{referral.code}}</small></div></div><small class="muted">{{tr('Referral points are earned only after your referred friend completes a purchase.')}}</small>{% endif %}<a class="soft-btn" href="/wishlist" style="display:inline-block;margin-top:12px">♡ {{tr('Wishlist')}}</a></section></div><section class="panel" style="margin-top:18px"><h2>{{tr('Orders')}}</h2>{% for o in orders %}<div class="row-card"><div><b>{{public_order_ref(o)}} · {% if o.plan %}{{o.plan.product.name}}{% else %}{{o.bundle.name}}{% endif %}</b><small class="muted">{{o.created_at.strftime('%d.%m.%Y %H:%M')}}</small>{% if o.delivery %}<div class="delivery-box"><b>📦 {{tr('Delivery')}}</b><pre>{{o.delivery.content}}</pre><small class="muted">{{o.delivery.delivered_at.strftime('%d.%m.%Y %H:%M')}}</small></div>{% endif %}</div><div><b>€{{'%.2f'|format(o.sale_price)}}</b><small class="muted">{{o.status}}</small></div></div>{% else %}<p class="muted">{{tr('No orders yet.')}}</p>{% endfor %}</section></div>{% endblock %}
+{% extends "base.html" %}
+{% block content %}
+<div class="v21-dashboard">
+  <aside class="v21-side">
+    <div class="v21-sidebrand">V<span>EYRA</span></div>
+    <a class="active" href="/account">⌂ {{ v21_tr('Overview') }}</a>
+    <a href="#orders">▣ {{ v21_tr('My Orders') }}</a>
+    <a href="#subscriptions">◷ {{ v21_tr('My Subscriptions') }}</a>
+    <a href="/wishlist">♡ {{ tr('Wishlist') }}</a>
+    <a href="/#deals">% {{ v21_tr('Deals & bundles') }}</a>
+    <a href="/v21/notifications">◉ {{ v21_tr('Notifications') }}{% if v21_unread %} <i>{{ v21_unread }}</i>{% endif %}</a>
+    <a href="/v21/support">? {{ v21_tr('Support Tickets') }}</a>
+    <a href="#settings">⚙ {{ v21_tr('Account Settings') }}</a>
+  </aside>
+
+  <main class="v21-dmain">
+    <div class="v21-dhead">
+      <div><span>ACCOUNT</span><h1>{{ tr('Welcome back') }} @{{ current_user.username }}</h1></div>
+      <a class="v21-btn ghost" href="/logout">{{ tr('Logout') }}</a>
+    </div>
+
+    <div class="v21-stats">
+      <div><small>ACTIVE</small><b>{{ active_count }}</b><span>{{ v21_tr('My Subscriptions') }}</span></div>
+      <div><small>ORDERS</small><b>{{ orders|length }}</b><span>{{ v21_tr('My Orders') }}</span></div>
+      <div><small>SAVED</small><b>{{ wishlist|length }}</b><span>{{ tr('Wishlist') }}</span></div>
+      <div><small>POINTS</small><b>{{ points }}</b><span>{{ tr('Loyalty points') }}</span></div>
+    </div>
+
+    <section id="subscriptions" class="v21-panel">
+      <div class="v21-sectiontitle"><span>{{ v21_tr('My Subscriptions') }}</span><h2>{{ v21_tr('Subscription status') }}</h2></div>
+      {% for s in subs %}
+        {% set days, status = v21_expiry(s) %}
+        <div class="v21-subrow">
+          <div class="v21-sublogo">
+            {% if s.product %}
+              {% set logo = product_logo(s.product) %}
+              {% if logo %}<img src="{{ logo }}" alt="{{ s.product.name }}">{% else %}{{ s.product.name[:1] }}{% endif %}
+            {% else %}V{% endif %}
+          </div>
+          <div>
+            <b>{% if s.product %}{{ s.product.name }}{% else %}{{ tr('Product unavailable') }}{% endif %}</b>
+            <small>
+              {% if s.expires_at %}{{ s.expires_at.strftime('%d.%m.%Y %H:%M') }} · {% endif %}
+              {{ days }} {{ v21_tr('Days remaining') }}
+            </small>
+          </div>
+          <span class="v21-status {{ status }}">{% if status == 'soon' %}{{ v21_tr('Expiring Soon') }}{% elif status == 'expired' %}{{ v21_tr('Expired') }}{% else %}{{ v21_tr('Active') }}{% endif %}</span>
+          {% if s.product and status in ['soon','expired'] %}<a href="/product/{{ s.product.slug }}" class="v21-btn ghost">{{ v21_tr('Renew') }} →</a>{% endif %}
+        </div>
+      {% else %}<p class="muted">{{ tr('No subscriptions yet.') }}</p>{% endfor %}
+    </section>
+
+    <section id="orders" class="v21-panel">
+      <div class="v21-sectiontitle"><span>{{ v21_tr('My Orders') }}</span><h2>{{ v21_tr('Order history') }}</h2></div>
+      {% for o in orders %}
+        <div class="v21-order">
+          <div>
+            <b>{{ public_order_ref(o) }}</b>
+            <span>
+              {% if o.plan and o.plan.product %}{{ o.plan.product.name }} · {{ o.plan.name }}
+              {% elif o.bundle %}{{ o.bundle.name }}
+              {% else %}{{ tr('Order') }} #{{ o.id }}{% endif %}
+            </span>
+            <small>{% if o.created_at %}{{ o.created_at.strftime('%d.%m.%Y %H:%M') }} · {% endif %}{{ o.status or '' }}</small>
+          </div>
+          <strong>€{{ '%.2f'|format(o.sale_price or 0) }}</strong>
+          {% if o.delivery and o.delivery.content %}<div class="v21-delivery"><b>📦 {{ tr('Delivery') }}</b><pre>{{ o.delivery.content }}</pre></div>{% endif %}
+        </div>
+      {% else %}<p class="muted">{{ tr('No orders yet.') }}</p>{% endfor %}
+    </section>
+
+    <div class="v21-two">
+      <section class="v21-panel">
+        <span>{{ v21_tr('Notifications') }}</span><h2>{{ v21_tr('Latest') }}</h2>
+        {% for n in notifications %}
+          <a class="v21-noteline {% if not n.read %}unread{% endif %}" href="/v21/notifications"><b>{{ n.title }}</b><small>{{ n.body }}</small></a>
+        {% else %}<p class="muted">{{ v21_tr('No notifications.') }}</p>{% endfor %}
+      </section>
+      <section id="settings" class="v21-panel">
+        <span>{{ v21_tr('Support Tickets') }}</span><h2>{{ v21_tr('Need help?') }}</h2>
+        {% for t in tickets %}
+          <a class="v21-noteline" href="/v21/support/{{ t.id }}"><b>#{{ t.id }} · {{ t.subject }}</b><small>{{ t.status }}</small></a>
+        {% else %}<p class="muted">{{ v21_tr('Create a ticket if you need help.') }}</p>{% endfor %}
+        <a class="v21-btn primary" href="/v21/support">{{ v21_tr('Create Ticket') }} →</a>
+      </section>
+    </div>
+  </main>
+</div>
+{% endblock %}
