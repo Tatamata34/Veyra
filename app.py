@@ -2715,6 +2715,23 @@ def v21_support():
         if not msg: flash("Please enter your message."); return redirect(url_for("v21_support"))
         t=V21Ticket(user_id=current_user.id,subject=subject,category=category,order_id=int(request.form["order_id"]) if request.form.get("order_id") else None)
         db.session.add(t);db.session.flush();db.session.add(V21TicketReply(ticket_id=t.id,user_id=current_user.id,message=msg,is_admin=False));db.session.commit()
+        # Notify the configured Veyra admins immediately. This uses sendMessage
+        # only and does not depend on Telegram polling/getUpdates.
+        try:
+            order_text = f"\nOrder: #{t.order_id}" if t.order_id else ""
+            admin_url = request.url_root.rstrip("/") + url_for("admin_v21_ticket", ticket_id=t.id)
+            telegram_message = (
+                f"🎫 NEW VEYRA SUPPORT TICKET\n\n"
+                f"Ticket: #{t.id}\n"
+                f"Customer: @{current_user.username}\n"
+                f"Category: {t.category}\n"
+                f"Subject: {t.subject}{order_text}\n\n"
+                f"Message:\n{msg}\n\n"
+                f"Open in Admin: {admin_url}"
+            )
+            send_telegram(telegram_message)
+        except Exception as exc:
+            app.logger.warning("Support ticket Telegram notification failed: %s", exc)
         return redirect(url_for("v21_ticket",ticket_id=t.id))
     tickets=V21Ticket.query.filter_by(user_id=current_user.id).order_by(V21Ticket.updated_at.desc()).all()
     return render_template("v21_support.html",tickets=tickets,orders=Order.query.filter_by(user_id=current_user.id).order_by(Order.created_at.desc()).limit(30).all())
@@ -2789,7 +2806,16 @@ def admin_v21():
                 db.session.commit();flash("Coupon rule saved.")
         return redirect(url_for("admin_v21"))
     products=Product.query.order_by(Product.sort_order,Product.name).all();deals=V21Deal.query.order_by(V21Deal.created_at.desc()).all();coupons=Coupon.query.order_by(Coupon.id.desc()).all();tickets=V21Ticket.query.order_by(V21Ticket.updated_at.desc()).limit(50).all();plans=Plan.query.filter_by(active=True).all()
-    return render_template("v21_admin.html",methods=methods,products=products,deals=deals,coupons=coupons,tickets=tickets,plans=plans)
+    unread_tickets=sum(1 for t in tickets if t.status=="open" and t.replies and not t.replies[-1].is_admin)
+    return render_template("v21_admin.html",methods=methods,products=products,deals=deals,coupons=coupons,tickets=tickets,plans=plans,unread_tickets=unread_tickets)
+
+@app.route("/admin/v21/ticket/<int:ticket_id>", methods=["GET"])
+@login_required
+def admin_v21_ticket(ticket_id):
+    if not current_user.is_admin:return ("Forbidden",403)
+    t=db.session.get(V21Ticket,ticket_id)
+    if not t:return ("Not found",404)
+    return render_template("v21_admin_ticket.html", ticket=t)
 
 @app.route("/admin/v21/ticket/<int:ticket_id>/reply", methods=["POST"])
 @login_required
@@ -2800,7 +2826,24 @@ def admin_v21_ticket_reply(ticket_id):
     msg=request.form.get("message","").strip()
     if msg:
         db.session.add(V21TicketReply(ticket_id=t.id,user_id=current_user.id,is_admin=True,message=msg));t.status=request.form.get("status","pending");v21_notify(t.user_id,"Support update",f"Your ticket #{t.id} has a new reply.","support");db.session.commit()
-    return redirect(url_for("admin_v21"))
+    return redirect(url_for("admin_v21_ticket", ticket_id=t.id))
+
+@app.route("/admin/v21/ticket-count")
+@login_required
+def admin_v21_ticket_count():
+    if not current_user.is_admin:return {"count":0}
+    count=0
+    latest=None
+    try:
+        tickets=V21Ticket.query.filter(V21Ticket.status=="open").order_by(V21Ticket.updated_at.desc()).limit(100).all()
+        for t in tickets:
+            replies=t.replies or []
+            if replies and not replies[-1].is_admin:
+                count += 1
+                if latest is None: latest=t
+    except Exception:
+        pass
+    return {"count":count,"latest":({"id":latest.id,"subject":latest.subject} if latest else None)}
 
 # Use the v2.1 storefront/dashboard while preserving legacy route endpoints for checkout/payment.
 def v21_index():
