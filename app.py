@@ -1631,7 +1631,8 @@ def admin():
         telegram_ids=telegram_admin_ids(),
         telegram_ready=bool(os.getenv("TELEGRAM_BOT_TOKEN")),
         audit_logs=AuditLog.query.order_by(AuditLog.created_at.desc()).limit(30).all(),
-        store_settings={x.key:x.value for x in AdminSetting.query.all()})
+        store_settings={x.key:x.value for x in AdminSetting.query.all()},
+        new_ticket_count=V21Ticket.query.filter_by(status="new").count() if "V21Ticket" in globals() else 0)
 
 @app.route("/admin/plan/<int:plan_id>", methods=["POST"])
 @login_required
