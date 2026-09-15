@@ -1,0 +1,19 @@
+{% extends "base.html" %}{% block content %}
+<div class="v21-detail v21-bundle-detail">
+  <a class="v21-back" href="/#deals">← {{tr('Back to deals')}}</a>
+  <div class="v21-producttop">
+    <div class="v21-detail-art v21-bundle-art">
+      <span class="v21-dealbadge">BUNDLE</span>
+      <div class="v21-bundle-logos">{% for item in items %}{% if product_logo(item.plan.product) %}<img src="{{product_logo(item.plan.product)}}" alt="{{item.plan.product.name}}">{% else %}<b>{{item.plan.product.name[:1]}}</b>{% endif %}{% endfor %}</div>
+    </div>
+    <div class="v21-detail-copy">
+      <span class="v21-kicker">{{tr('Special offer')}}</span>
+      <h1>{{bundle.name}}</h1>
+      <p class="v21-description">{{bundle.description}}</p>
+      <div class="v21-meta-grid"><div><small>{{tr('Included')}}</small><b>{{items|length}} products</b></div><div><small>{{tr('Savings')}}</small><b>€{{'%.2f'|format([original-bundle.price,0]|max)}}</b></div></div>
+      <div class="v21-receive"><span>{{tr('BUNDLE PRICE')}}</span><strong>€{{'%.2f'|format(bundle.price)}}</strong><small>{{tr('One order · all included plans')}}</small></div>
+      {% if current_user.is_authenticated %}<form method="post" action="/bundle/{{bundle.id}}/order"><input type="hidden" name="csrf_token" value="{{csrf_token}}"><button class="v21-btn primary">{{tr('Buy Now')}} →</button></form>{% else %}<a class="v21-btn primary" href="/login">{{tr('Login to order')}}</a>{% endif %}
+    </div>
+  </div>
+  <section class="v21-panel"><span>{{tr('Included products')}}</span><h2>{{tr('What you get')}}</h2><div class="v21-bundle-lines">{% for item in items %}<div><div class="v21-bundle-line-logo">{% if product_logo(item.plan.product) %}<img src="{{product_logo(item.plan.product)}}">{% else %}{{item.plan.product.name[:1]}}{% endif %}</div><div><b>{{item.plan.product.name}}</b><small>{{item.plan.name}}</small></div></div>{% endfor %}</div></section>
+</div>{% endblock %}
