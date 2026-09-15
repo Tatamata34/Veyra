@@ -1612,7 +1612,7 @@ def admin():
     # Phase 6 analytics: compact, database-backed reporting for the last 14 days.
     today = datetime.utcnow().date()
     analytics_days = []
-    for offset in range(13, -1, -1):
+    for offset in range(29, -1, -1):
         day = today - timedelta(days=offset)
         day_orders = [o for o in orders if o.created_at and o.created_at.date() == day and o.status != "cancelled"]
         analytics_days.append({
@@ -1637,6 +1637,7 @@ def admin():
         reviews=reviews, coupons=coupons, wishlist_count=wishlist_count, points_total=points_total,
         revenue=revenue, costs=costs, profit=profit, avg_order=avg_order,
         analytics_days=analytics_days, top_products=top_products,
+        expiring_subscriptions=Subscription.query.filter(Subscription.active==True, Subscription.expires_at <= datetime.utcnow()+timedelta(days=7)).order_by(Subscription.expires_at.asc()).limit(50).all(),
         active_products=Product.query.filter_by(active=True).count(),
         active_subscriptions=Subscription.query.filter_by(active=True).count(),
         pending_orders=Order.query.filter_by(status="pending").count(),
@@ -2317,6 +2318,42 @@ def admin_subscription_action(subscription_id, action):
     db.session.commit()
     return redirect(url_for("admin") + "#subscriptions")
 
+@app.route("/admin/subscription/<int:subscription_id>/manage", methods=["POST"])
+@login_required
+def admin_subscription_manage(subscription_id):
+    if not admin_required(): return ("Forbidden",403)
+    sub=db.session.get(Subscription,subscription_id)
+    if not sub: return ("Not found",404)
+    action=request.form.get("action","extend")
+    if action=="extend_days":
+        try: days=max(1,min(3650,int(request.form.get("days","30"))))
+        except (TypeError,ValueError): days=30
+        base=max(datetime.utcnow(),sub.expires_at)
+        sub.expires_at=base+timedelta(days=days);sub.active=True
+        flash(f"{sub.product.name} u zgjat për {days} ditë.")
+        audit("Subscription extended",f"#{sub.id} +{days} days")
+    elif action=="change_plan":
+        plan=db.session.get(Plan,request.form.get("plan_id",type=int))
+        if not plan or plan.product_id!=sub.product_id:
+            flash("Invalid plan for this product.")
+            return redirect(url_for("admin")+"#subscriptions")
+        sub.plan_id=plan.id
+        flash(f"Plani u ndryshua në {plan.name}.")
+        audit("Subscription plan changed",f"#{sub.id} → {plan.name}")
+    elif action=="set_expiry":
+        raw=request.form.get("expires_at","").strip()
+        try:
+            sub.expires_at=datetime.fromisoformat(raw)
+            sub.active=True
+            flash("Data e skadimit u ruajt.")
+            audit("Subscription expiry changed",f"#{sub.id} → {sub.expires_at.isoformat()}")
+        except ValueError:
+            flash("Invalid expiry date.")
+    else:
+        return ("Bad action",400)
+    db.session.commit()
+    return redirect(url_for("admin")+"#subscriptions")
+
 @app.route("/admin/reorder/products", methods=["POST"])
 @login_required
 def admin_reorder_products():
@@ -2349,6 +2386,44 @@ def admin_reorder_plans():
     audit("Plans reordered", f"product_id={product_id}, {len(plans)} plans")
     db.session.commit()
     return {"ok": True}
+
+@app.route("/admin/invoice/<int:order_id>.pdf")
+@login_required
+def admin_invoice_pdf(order_id):
+    if not admin_required(): return ("Forbidden",403)
+    o=db.session.get(Order,order_id)
+    if not o: return ("Not found",404)
+    try:
+        from reportlab.lib.pagesizes import A4
+        from reportlab.pdfgen import canvas
+        from reportlab.lib.units import mm
+    except ImportError:
+        return ("Invoice PDF dependency is not installed.",500)
+    import io
+    product=o.plan.product.name if o.plan and o.plan.product else (o.bundle.name if o.bundle else "Digital product")
+    plan=o.plan.name if o.plan else "Bundle"
+    buf=io.BytesIO(); c=canvas.Canvas(buf,pagesize=A4); w,h=A4
+    c.setTitle(f"Veyra Invoice #{o.id}")
+    c.setFont("Helvetica-Bold",22); c.drawString(25*mm,h-30*mm,"VEYRA")
+    c.setFont("Helvetica",10); c.drawString(25*mm,h-37*mm,"Digital marketplace")
+    c.setFont("Helvetica-Bold",14); c.drawRightString(w-25*mm,h-30*mm,f"INVOICE #{o.id}")
+    c.setFont("Helvetica",9); c.drawRightString(w-25*mm,h-37*mm,o.created_at.strftime("%d.%m.%Y %H:%M"))
+    y=h-60*mm
+    c.setFont("Helvetica-Bold",10); c.drawString(25*mm,y,"CUSTOMER")
+    c.setFont("Helvetica",10); c.drawString(25*mm,y-6*mm,f"@{o.user.username}"); c.drawString(25*mm,y-12*mm,o.user.email)
+    y-=32*mm
+    c.setFont("Helvetica-Bold",10); c.drawString(25*mm,y,"ITEM"); c.drawRightString(w-25*mm,y,"AMOUNT")
+    y-=8*mm; c.line(25*mm,y,w-25*mm,y); y-=9*mm
+    c.setFont("Helvetica",10); c.drawString(25*mm,y,f"{product} · {plan}"); c.drawRightString(w-25*mm,y,f"EUR {o.sale_price:.2f}")
+    y-=10*mm
+    if o.discount:
+        c.drawString(25*mm,y,"Discount"); c.drawRightString(w-25*mm,y,f"- EUR {o.discount:.2f}"); y-=8*mm
+    c.line(110*mm,y,w-25*mm,y); y-=10*mm
+    c.setFont("Helvetica-Bold",11); c.drawString(25*mm,y,"TOTAL"); c.drawRightString(w-25*mm,y,f"EUR {o.sale_price:.2f}")
+    y-=18*mm; c.setFont("Helvetica",9); c.drawString(25*mm,y,f"Status: {o.status}")
+    c.drawString(25*mm,y-6*mm,"Thank you for your purchase.")
+    c.save(); buf.seek(0)
+    return Response(buf.getvalue(),mimetype="application/pdf",headers={"Content-Disposition":f"attachment; filename=veyra-invoice-{o.id}.pdf"})
 
 @app.route("/admin/export/orders.csv")
 @login_required
@@ -3169,6 +3244,45 @@ def admin_catalog_backup_download(backup_id):
     b=db.session.get(V21CatalogBackup,backup_id)
     if not b:return ("Not found",404)
     return Response(b.payload,mimetype="application/json",headers={"Content-Disposition":f"attachment; filename=veyra-catalog-backup-{b.id}.json"})
+
+@app.route("/admin/catalog/compare")
+@login_required
+def admin_catalog_compare():
+    if not current_user.is_admin:return ("Forbidden",403)
+    backups=V21CatalogBackup.query.order_by(V21CatalogBackup.created_at.desc()).limit(8).all()
+    current={p.id:p for p in Product.query.all()}
+    rows=[]
+    for b in backups:
+        try: data=json.loads(b.payload); products=data.get("products",data) if isinstance(data,dict) else data
+        except Exception: products=[]
+        ids={int(x.get("id")) for x in products if isinstance(x,dict) and str(x.get("id","")).isdigit()}
+        slugs={str(x.get("slug")) for x in products if isinstance(x,dict) and x.get("slug")}
+        current_slugs={p.slug for p in current.values()}
+        added=[p for p in current.values() if p.id not in ids and p.slug not in slugs]
+        missing=[x for x in products if isinstance(x,dict) and not ((str(x.get("id","")).isdigit() and int(x.get("id")) in current) or (x.get("slug") in current_slugs))]
+        changed_plans=[]
+        for x in products:
+            if not isinstance(x,dict): continue
+            cp=current.get(int(x.get("id"))) if str(x.get("id","")).isdigit() else None
+            if not cp and x.get("slug"): cp=Product.query.filter_by(slug=x.get("slug")).first()
+            if not cp: continue
+            current_plans={(pl.id,pl.name):pl for pl in cp.plans}
+            backup_plans=x.get("plans") or []
+            for bp in backup_plans:
+                bp_id=int(bp.get("id")) if str(bp.get("id","")).isdigit() else None
+                pl=current_plans.get((bp_id,bp.get("name"))) if bp_id else None
+                if not pl:
+                    pl=next((v for (pid,n),v in current_plans.items() if n==bp.get("name")),None)
+                if not pl: continue
+                diffs=[]
+                for field in ("months","price","sale_price","cost_price","active"):
+                    bv=bp.get(field); cv=getattr(pl,field)
+                    if isinstance(bv,(int,float)) and isinstance(cv,(int,float)):
+                        if abs(float(bv)-float(cv))>0.0001: diffs.append(f"{field}: {bv} → {cv}")
+                    elif bv != cv: diffs.append(f"{field}: {bv} → {cv}")
+                if diffs: changed_plans.append({"product":cp.name,"plan":pl.name,"diffs":diffs})
+        rows.append({"backup":b,"backup_products":len(products),"current_products":len(current),"current_only":added,"backup_only":missing,"changed_plans":changed_plans})
+    return render_template("admin_catalog_compare.html",rows=rows)
 
 @app.route("/admin/v21/ticket/<int:ticket_id>/status", methods=["POST"])
 @login_required
