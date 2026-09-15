@@ -1223,8 +1223,15 @@ def telegram_poll_loop():
                     TELEGRAM_LAST_UPDATE = max(TELEGRAM_LAST_UPDATE, upd.get("update_id", 0))
                     try: telegram_handle_update(upd)
                     except Exception as exc: app.logger.exception("Telegram update failed: %s", exc)
+            elif result and result.get("error_code") == 409:
+                # Railway can briefly keep the previous container alive during a rolling deploy.
+                # Only one long-polling getUpdates client may run at a time, so back off instead
+                # of flooding logs while the old instance shuts down.
+                app.logger.warning("Telegram polling conflict (another bot instance is active); retrying in 60s.")
+                time.sleep(60)
         except Exception as exc:
             app.logger.warning("Telegram poll loop: %s", exc)
+            time.sleep(5)
         time.sleep(1)
 
 def start_telegram_bot():
@@ -1298,12 +1305,6 @@ def index():
     deals = [d for d in V21Deal.query.order_by(V21Deal.created_at.desc()).all() if v21_deal_active(d)] if "V21Deal" in globals() else []
     recent = v21_recent() if "v21_recent" in globals() else []
     return render_template("v21_index.html", products=products, categories=categories, deals=deals, bundles=bundles, recent=recent)
-
-@app.route("/categories")
-def categories():
-    categories = Category.query.order_by(Category.name).all()
-    products = Product.query.filter_by(active=True).order_by(Product.sort_order.asc(), Product.featured.desc(), Product.name).all()
-    return render_template("categories.html", categories=categories, products=products)
 
 @app.route("/ref/<code>")
 def referral_landing(code):
@@ -2363,6 +2364,8 @@ def admin_product_delete(product_id):
     plan_ids = [x.id for x in p.plans]
     order_ids = [x.id for x in Order.query.filter(Order.plan_id.in_(plan_ids)).all()] if plan_ids else []
     if order_ids:
+        if "V21Ticket" in globals():
+            V21Ticket.query.filter(V21Ticket.order_id.in_(order_ids)).update({V21Ticket.order_id: None}, synchronize_session=False)
         OrderDelivery.query.filter(OrderDelivery.order_id.in_(order_ids)).delete(synchronize_session=False)
         Subscription.query.filter(Subscription.order_id.in_(order_ids)).delete(synchronize_session=False)
         CouponUsage.query.filter(CouponUsage.order_id.in_(order_ids)).delete(synchronize_session=False)
@@ -2394,6 +2397,10 @@ def admin_product_delete(product_id):
                     b.active = False
 
         Subscription.query.filter(Subscription.product_id == p.id).delete(synchronize_session=False)
+        for pid in plan_ids:
+            obj = db.session.get(Plan, pid)
+            if obj is not None:
+                db.session.expunge(obj)
         db.session.execute(db.delete(Plan).where(Plan.id.in_(plan_ids)))
 
     Review.query.filter_by(product_id=p.id).delete(synchronize_session=False)
@@ -3400,6 +3407,12 @@ def admin_catalog_restore():
                     db.session.delete(d)
         BundleItem.query.filter(BundleItem.plan_id.in_(plan_ids)).delete(synchronize_session=False)
         Subscription.query.filter(Subscription.plan_id.in_(plan_ids)).delete(synchronize_session=False)
+        # The product.plans relationship may already be loaded; expire it before the bulk SQL delete
+        # so SQLAlchemy does not try to delete the same Plan rows a second time on autoflush.
+        for pid in plan_ids:
+            obj = db.session.get(Plan, pid)
+            if obj is not None:
+                db.session.expunge(obj)
         db.session.execute(db.delete(Plan).where(Plan.id.in_(plan_ids)))
 
     def _delete_product_for_restore(prod):
@@ -3565,4 +3578,35 @@ def admin_v21_ticket_status(ticket_id):
     t.status=status; db.session.commit()
     v21_notify(t.user_id,"Support ticket update",f"Ticket #{t.id} is now {status}.","support"); db.session.commit()
     return redirect(url_for("admin_v21_ticket",ticket_id=t.id))
+
+# Canonical storefront routes kept at the end of the module so all V21 models/helpers are loaded before requests.
+@app.route("/categories")
+def categories():
+    categories = Category.query.order_by(Category.name.asc()).all()
+    products = Product.query.filter_by(active=True).order_by(Product.sort_order.asc(), Product.featured.desc(), Product.name.asc()).all()
+    return render_template("categories.html", categories=categories, products=products)
+
+@app.route("/products")
+def storefront_products():
+    products = Product.query.filter_by(active=True).order_by(Product.sort_order.asc(), Product.featured.desc(), Product.name.asc()).all()
+    categories = Category.query.order_by(Category.name.asc()).all()
+    initial_search = request.args.get("search", "").strip()
+    return render_template("storefront_products.html", products=products, categories=categories, initial_search=initial_search)
+
+@app.route("/deals")
+def storefront_deals():
+    bundles = Bundle.query.filter_by(active=True).order_by(Bundle.featured.desc(), Bundle.name.asc()).all()
+    deals = [d for d in V21Deal.query.order_by(V21Deal.created_at.desc()).all() if v21_deal_active(d)] if "V21Deal" in globals() else []
+    return render_template("storefront_deals.html", bundles=bundles, deals=deals)
+
+@app.route("/bundles")
+def storefront_bundles():
+    bundles = Bundle.query.filter_by(active=True).order_by(Bundle.featured.desc(), Bundle.name.asc()).all()
+    return render_template("storefront_bundles.html", bundles=bundles)
+
+@app.route("/support")
+def storefront_support():
+    if current_user.is_authenticated:
+        return redirect(url_for("v21_support"))
+    return redirect(url_for("login", next=url_for("v21_support")))
 
