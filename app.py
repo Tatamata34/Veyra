@@ -278,6 +278,7 @@ for _lang, _vals in {
 }.items():
     TRANSLATIONS[_lang].update(_vals)
 
+TRANSLATIONS["en"].update({"VEYRA Guarantee & Support":"VEYRA Guarantee & Support","Product Guarantee":"Product Guarantee","Replacement Support":"Replacement Support","Customer Support":"Customer Support","If something goes wrong with your purchase, contact us and we will review the issue according to our Guarantee Policy.":"If something goes wrong with your purchase, contact us and we will review the issue according to our Guarantee Policy.","Eligible products may be replaced when the issue is covered by our Guarantee Policy.":"Eligible products may be replaced when the issue is covered by our Guarantee Policy.","We are here to help before and after your purchase.":"We are here to help before and after your purchase.","Verified Purchase":"Verified Purchase","Need help with this order?":"Need help with this order?","Open a Support Ticket":"Open a Support Ticket"})
 TRANSLATIONS["en"].update({"Wishlist":"Wishlist","Saved products":"Saved products","View Product":"View Product","Your wishlist is empty.":"Your wishlist is empty.","Loyalty points":"Loyalty points","Delivery":"Delivery"})
 TRANSLATIONS["de"].update({"Wishlist":"Wunschliste","Saved products":"Gespeicherte Produkte","Your wishlist is empty.":"Deine Wunschliste ist leer.","Loyalty points":"Treuepunkte","Delivery":"Lieferung"})
 TRANSLATIONS["fr"].update({"Wishlist":"Liste de souhaits","Saved products":"Produits enregistrés","Your wishlist is empty.":"Votre liste de souhaits est vide.","Loyalty points":"Points fidélité","Delivery":"Livraison"})
@@ -1376,6 +1377,20 @@ def account_telegram_link():
     telegram_url=f"https://t.me/{bot_username}?start=link_{token}"
     flash(f"Telegram link ready: {telegram_url} — or send /link {token} to @{bot_username} within 15 minutes.")
     return redirect(url_for("account"))
+
+for _l in ("de","fr","sq"):
+    TRANSLATIONS[_l].update({
+        "VEYRA Guarantee & Support": "VEYRA Garantie & Support" if _l=="de" else ("Garantie & Assistance VEYRA" if _l=="fr" else "Garancia & Mbështetja VEYRA"),
+        "Product Guarantee": "Produktgarantie" if _l=="de" else ("Garantie produit" if _l=="fr" else "Garanci për produktin"),
+        "Replacement Support": "Ersatz-Support" if _l=="de" else ("Assistance remplacement" if _l=="fr" else "Mbështetje për zëvendësim"),
+        "Customer Support": "Kundensupport" if _l=="de" else ("Assistance client" if _l=="fr" else "Mbështetje për klientin"),
+        "If something goes wrong with your purchase, contact us and we will review the issue according to our Guarantee Policy.": "Wenn mit deinem Kauf etwas nicht stimmt, kontaktiere uns. Wir prüfen den Fall gemäß unserer Garantie-Richtlinie." if _l=="de" else ("Si un problème survient avec votre achat, contactez-nous. Nous examinerons le problème conformément à notre politique de garantie." if _l=="fr" else "Nëse ka problem me blerjen tënde, na kontakto dhe do ta shqyrtojmë sipas Politikës së Garancisë."),
+        "Eligible products may be replaced when the issue is covered by our Guarantee Policy.": "Berechtigte Produkte können ersetzt werden, wenn das Problem von unserer Garantie-Richtlinie abgedeckt ist." if _l=="de" else ("Les produits éligibles peuvent être remplacés lorsque le problème est couvert par notre politique de garantie." if _l=="fr" else "Produktet e përshtatshme mund të zëvendësohen kur problemi mbulohet nga Politika jonë e Garancisë."),
+        "We are here to help before and after your purchase.": "Wir helfen dir vor und nach deinem Kauf." if _l=="de" else ("Nous sommes là pour vous aider avant et après votre achat." if _l=="fr" else "Jemi këtu për të të ndihmuar para dhe pas blerjes."),
+        "Verified Purchase": "Verifizierter Kauf" if _l=="de" else ("Achat vérifié" if _l=="fr" else "Blerje e verifikuar"),
+        "Need help with this order?": "Brauchst du Hilfe bei dieser Bestellung?" if _l=="de" else ("Besoin d'aide avec cette commande ?" if _l=="fr" else "Ke nevojë për ndihmë me këtë porosi?"),
+        "Open a Support Ticket": "Support-Ticket öffnen" if _l=="de" else ("Ouvrir un ticket" if _l=="fr" else "Hap një ticket mbështetjeje")
+    })
 
 @app.route("/account")
 @login_required
@@ -3076,6 +3091,10 @@ def v21_notifications():
     notes=V21Notification.query.filter_by(user_id=current_user.id).order_by(V21Notification.created_at.desc()).limit(100).all()
     return render_template("v21_notifications.html",notifications=notes)
 
+@app.route("/trust")
+def v21_trust_center():
+    return render_template("v21_trust.html")
+
 @app.route("/v21/support", methods=["GET","POST"])
 @login_required
 def v21_support():
@@ -3093,7 +3112,10 @@ def v21_support():
         send_telegram(ticket_msg, kb)
         return redirect(url_for("v21_ticket",ticket_id=t.id))
     tickets=V21Ticket.query.filter_by(user_id=current_user.id).order_by(V21Ticket.updated_at.desc()).all()
-    return render_template("v21_support.html",tickets=tickets,orders=Order.query.filter_by(user_id=current_user.id).order_by(Order.created_at.desc()).limit(30).all())
+    orders=Order.query.filter_by(user_id=current_user.id).order_by(Order.created_at.desc()).limit(30).all()
+    requested_order_id=request.args.get("order_id", type=int)
+    requested_order_id=requested_order_id if any(o.id==requested_order_id for o in orders) else None
+    return render_template("v21_support.html",tickets=tickets,orders=orders,requested_order_id=requested_order_id)
 
 @app.route("/v21/support/<int:ticket_id>", methods=["GET","POST"])
 @login_required
