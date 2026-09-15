@@ -1713,16 +1713,49 @@ def complete_order_record(o, source="admin"):
 def admin_manual_order():
     if not admin_required(): return ("Forbidden", 403)
     try:
-        user_id = int(request.form.get("user_id", 0) or 0)
+        user_id_raw = request.form.get("user_id", "").strip()
+        customer_label = request.form.get("customer_name", "").strip().lstrip("@").strip()
         plan_id_raw = request.form.get("plan_id", "").strip()
         bundle_id_raw = request.form.get("bundle_id", "").strip()
         status = request.form.get("status", "pending").strip().lower()
         if status not in {"pending", "processing", "completed"}:
             status = "pending"
-        user = db.session.get(User, user_id)
+
+        user = None
+        # Existing customer selection is optional. If no registered customer exists,
+        # the admin can type a name/username and Veyra creates a lightweight manual
+        # customer record automatically so the order still has a stable owner.
+        if user_id_raw:
+            try:
+                user = db.session.get(User, int(user_id_raw))
+            except (TypeError, ValueError):
+                user = None
+            if not user or user.is_admin:
+                user = None
+
+        if customer_label:
+            # Prefer an exact username match before creating a new manual client.
+            existing = User.query.filter(db.func.lower(User.username) == customer_label.lower()).first()
+            if existing and not existing.is_admin:
+                user = existing
+            elif not user:
+                base = re.sub(r"[^A-Za-z0-9_.-]+", "_", customer_label).strip("_.-")[:32] or "customer"
+                username = base
+                n = 2
+                while User.query.filter_by(username=username).first():
+                    suffix = f"_{n}"
+                    username = (base[:40-len(suffix)] + suffix)
+                    n += 1
+                email = f"manual.{secrets.token_hex(8)}@customer.veyra.local"
+                user = User(username=username, email=email,
+                            password_hash=generate_password_hash(secrets.token_urlsafe(24)))
+                db.session.add(user)
+                db.session.flush()
+
         if not user or user.is_admin:
-            flash("Choose a valid customer.")
+            flash("Choose a customer or write a customer name/username.")
             return redirect(url_for("admin") + "#orders")
+
         plan = db.session.get(Plan, int(plan_id_raw)) if plan_id_raw else None
         bundle = db.session.get(Bundle, int(bundle_id_raw)) if bundle_id_raw else None
         if (plan is None) == (bundle is None):
@@ -1734,12 +1767,14 @@ def admin_manual_order():
         if bundle and (not bundle.active or not bundle.items):
             flash("That bundle is not active or has no plans.")
             return redirect(url_for("admin") + "#orders")
+
         if plan:
             default_price = plan.sale_price if plan.sale_price is not None else plan.price
             default_cost = plan.cost_price or 0.0
         else:
             default_price = bundle.price
             default_cost = sum((x.plan.cost_price or 0.0) * x.quantity for x in bundle.items if x.plan)
+
         sale_raw = request.form.get("sale_price", "").strip()
         sale_price = float(sale_raw) if sale_raw else float(default_price)
         cost_price = float(default_cost)
@@ -1814,6 +1849,116 @@ def admin_order_resend_telegram(order_id):
     db.session.commit()
     flash("Delivery resent to customer Telegram." if sent else "Telegram delivery failed.")
     return redirect(url_for("admin_order_detail", order_id=order_id))
+
+@app.route("/admin/customers/add", methods=["POST"])
+@login_required
+def admin_customer_add():
+    if not admin_required(): return ("Forbidden", 403)
+    username = request.form.get("username", "").strip()
+    email = request.form.get("email", "").strip()
+    password = request.form.get("password", "").strip()
+    if not username:
+        flash("Username / customer name is required.")
+        return redirect(url_for("admin") + "#customers")
+    username = username[:40]
+    if User.query.filter(db.func.lower(User.username) == username.lower()).first():
+        flash("That username already exists.")
+        return redirect(url_for("admin") + "#customers")
+    if email and User.query.filter(db.func.lower(User.email) == email.lower()).first():
+        flash("That email already exists.")
+        return redirect(url_for("admin") + "#customers")
+    if not email:
+        email = f"manual.{secrets.token_hex(8)}@customer.veyra.local"
+    if not password:
+        password = secrets.token_urlsafe(18)
+    u = User(username=username, email=email, password_hash=generate_password_hash(password), is_admin=False)
+    db.session.add(u)
+    db.session.commit()
+    audit("Customer created", f"@{u.username}")
+    db.session.commit()
+    flash(f"Customer @{u.username} was created.")
+    return redirect(url_for("admin") + "#customers")
+
+
+def _delete_customer_data(user_id):
+    """Remove a customer and all customer-owned transactional/support data safely."""
+    # Null admin/audit references first.
+    AuditLog.query.filter_by(admin_user_id=user_id).update({AuditLog.admin_user_id: None}, synchronize_session=False)
+    V21CatalogBackup.query.filter_by(created_by=user_id).update({V21CatalogBackup.created_by: None}, synchronize_session=False)
+
+    # Support: replies can point to the customer, tickets own their replies.
+    if "V21TicketReply" in globals():
+        V21TicketReply.query.filter_by(user_id=user_id).update({V21TicketReply.user_id: None}, synchronize_session=False)
+    if "V21Ticket" in globals():
+        tickets = V21Ticket.query.filter_by(user_id=user_id).all()
+        for t in tickets:
+            t.order_id = None
+        db.session.flush()
+        for t in tickets:
+            db.session.delete(t)
+        db.session.flush()
+    if "V21Notification" in globals(): V21Notification.query.filter_by(user_id=user_id).delete(synchronize_session=False)
+    if "V21RecentlyViewed" in globals(): V21RecentlyViewed.query.filter_by(user_id=user_id).delete(synchronize_session=False)
+    if "TelegramProfile" in globals(): TelegramProfile.query.filter_by(user_id=user_id).delete(synchronize_session=False)
+    TelegramLink.query.filter_by(user_id=user_id).delete(synchronize_session=False)
+
+    # Customer-owned commerce data.
+    CouponUsage.query.filter_by(user_id=user_id).delete(synchronize_session=False)
+    Wishlist.query.filter_by(user_id=user_id).delete(synchronize_session=False)
+    Review.query.filter_by(user_id=user_id).delete(synchronize_session=False)
+    LoyaltyPoint.query.filter_by(user_id=user_id).delete(synchronize_session=False)
+    Referral.query.filter((Referral.referrer_id == user_id) | (Referral.referred_id == user_id)).delete(synchronize_session=False)
+
+    # Orders must be removed before the user because user_id is non-nullable.
+    orders = Order.query.filter_by(user_id=user_id).all()
+    for o in orders:
+        if "V21Ticket" in globals():
+            V21Ticket.query.filter_by(order_id=o.id).update({V21Ticket.order_id: None}, synchronize_session=False)
+        OrderDelivery.query.filter_by(order_id=o.id).delete(synchronize_session=False)
+        Subscription.query.filter_by(order_id=o.id).delete(synchronize_session=False)
+        CouponUsage.query.filter_by(order_id=o.id).update({CouponUsage.order_id: None}, synchronize_session=False)
+        db.session.delete(o)
+    db.session.flush()
+
+    Subscription.query.filter_by(user_id=user_id).delete(synchronize_session=False)
+    u = db.session.get(User, user_id)
+    if u:
+        db.session.delete(u)
+    db.session.flush()
+
+@app.route("/admin/customers/delete", methods=["POST"])
+@login_required
+def admin_customers_delete():
+    if not admin_required(): return ("Forbidden", 403)
+    raw_ids = request.form.getlist("user_ids")
+    ids = []
+    for raw in raw_ids:
+        try:
+            uid = int(raw)
+            if uid not in ids: ids.append(uid)
+        except (TypeError, ValueError):
+            pass
+    if not ids:
+        flash("Select at least one customer.")
+        return redirect(url_for("admin") + "#customers")
+    deleted=[]
+    try:
+        for uid in ids:
+            u=db.session.get(User, uid)
+            if not u or u.is_admin:
+                continue
+            name=u.username
+            _delete_customer_data(uid)
+            deleted.append(name)
+        db.session.commit()
+        audit("Customers deleted", ", ".join("@"+x for x in deleted) if deleted else "No customers deleted")
+        db.session.commit()
+        flash(f"Deleted {len(deleted)} customer(s). Their orders, subscriptions and support data were also removed.")
+    except Exception as exc:
+        db.session.rollback()
+        app.logger.exception("Customer delete failed")
+        flash(f"Could not delete customers: {exc}")
+    return redirect(url_for("admin") + "#customers")
 
 @app.route("/admin/customer/<int:user_id>")
 @login_required
