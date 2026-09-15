@@ -57,6 +57,10 @@
         💬 {{ tr("Open WhatsApp") }} →
       </button>
 
+      <a href="{{ url_for('v21_support') }}?order_id={{ order.id }}" class="veyra-order-support" style="width:100%;box-sizing:border-box;text-align:center;text-decoration:none;border-radius:18px;padding:17px 20px;background:#fff;border:1px solid #dfe5ef;color:#1b2946;font-size:17px;font-weight:800;">
+        🛡️ {{ tr("Need help with this order?") }}<br><span style="font-size:13px;font-weight:600;color:#71809a;">{{ tr("Open a Support Ticket") }} →</span>
+      </a>
+
       <a href="{{ url_for('account') }}"
          style="width:100%;box-sizing:border-box;text-align:center;text-decoration:none;border-radius:18px;padding:17px 20px;background:#f3f6fb;border:1px solid #dfe5ef;color:#1b2946;font-size:17px;font-weight:800;">
         👤 {{ tr("Go to account") }}
