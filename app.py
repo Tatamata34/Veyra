@@ -1288,10 +1288,15 @@ def audit(action, details=""):
 
 @app.route("/")
 def index():
-    products = Product.query.filter_by(active=True).order_by(Product.sort_order.asc(), Product.featured.desc(), Product.name).all()
+    # Always use the current Veyra storefront here. Keeping this explicit avoids
+    # relying on a late view-function replacement and guarantees bundles/deals
+    # use the same storefront template in production.
+    products = Product.query.filter_by(active=True).order_by(Product.sort_order.asc(), Product.id).all()
     categories = Category.query.order_by(Category.name).all()
     bundles = Bundle.query.filter_by(active=True).order_by(Bundle.featured.desc(), Bundle.name).all()
-    return render_template("index.html", products=products, categories=categories, bundles=bundles)
+    deals = [d for d in V21Deal.query.order_by(V21Deal.created_at.desc()).all() if v21_deal_active(d)] if "V21Deal" in globals() else []
+    recent = v21_recent() if "v21_recent" in globals() else []
+    return render_template("v21_index.html", products=products, categories=categories, deals=deals, bundles=bundles, recent=recent)
 
 @app.route("/categories")
 def categories():
@@ -1703,6 +1708,62 @@ def complete_order_record(o, source="admin"):
     return True
 
 
+@app.route("/admin/order/manual", methods=["POST"])
+@login_required
+def admin_manual_order():
+    if not admin_required(): return ("Forbidden", 403)
+    try:
+        user_id = int(request.form.get("user_id", 0) or 0)
+        plan_id_raw = request.form.get("plan_id", "").strip()
+        bundle_id_raw = request.form.get("bundle_id", "").strip()
+        status = request.form.get("status", "pending").strip().lower()
+        if status not in {"pending", "processing", "completed"}:
+            status = "pending"
+        user = db.session.get(User, user_id)
+        if not user or user.is_admin:
+            flash("Choose a valid customer.")
+            return redirect(url_for("admin") + "#orders")
+        plan = db.session.get(Plan, int(plan_id_raw)) if plan_id_raw else None
+        bundle = db.session.get(Bundle, int(bundle_id_raw)) if bundle_id_raw else None
+        if (plan is None) == (bundle is None):
+            flash("Choose exactly one product plan or bundle.")
+            return redirect(url_for("admin") + "#orders")
+        if plan and (not plan.active or not plan.product or not plan.product.active):
+            flash("That plan is not active.")
+            return redirect(url_for("admin") + "#orders")
+        if bundle and (not bundle.active or not bundle.items):
+            flash("That bundle is not active or has no plans.")
+            return redirect(url_for("admin") + "#orders")
+        if plan:
+            default_price = plan.sale_price if plan.sale_price is not None else plan.price
+            default_cost = plan.cost_price or 0.0
+        else:
+            default_price = bundle.price
+            default_cost = sum((x.plan.cost_price or 0.0) * x.quantity for x in bundle.items if x.plan)
+        sale_raw = request.form.get("sale_price", "").strip()
+        sale_price = float(sale_raw) if sale_raw else float(default_price)
+        cost_price = float(default_cost)
+        o = Order(user_id=user.id, plan_id=plan.id if plan else None, bundle_id=bundle.id if bundle else None,
+                  status="pending", sale_price=sale_price, cost_price=cost_price,
+                  profit=round(sale_price-cost_price, 2), discount=0.0)
+        db.session.add(o)
+        db.session.flush()
+        if status == "processing":
+            o.status = "processing"
+        db.session.commit()
+        if status == "completed":
+            complete_order_record(o, source="admin-manual")
+            db.session.commit()
+        audit("Manual order created", f"{public_order_ref(o)} — @{user.username}")
+        db.session.commit()
+        notify_admins(customer_order_notification(o), "new_order", o)
+        flash(f"Manual order {public_order_ref(o)} created for @{user.username}.")
+    except Exception as exc:
+        db.session.rollback()
+        app.logger.exception("Manual order creation failed")
+        flash(f"Could not create manual order: {exc}")
+    return redirect(url_for("admin") + "#orders")
+
 @app.route("/admin/order/<int:order_id>")
 @login_required
 def admin_order_detail(order_id):
@@ -1796,17 +1857,26 @@ def admin_order_delete(order_id):
     if not admin_required(): return ("Forbidden", 403)
     o = db.session.get(Order, order_id)
     if not o: return ("Not found", 404)
-    public_label = f"{public_order_ref(o)}"
-    if "V21Ticket" in globals():
-        V21Ticket.query.filter_by(order_id=o.id).update({V21Ticket.order_id: None}, synchronize_session=False)
-    OrderDelivery.query.filter_by(order_id=o.id).delete(synchronize_session=False)
-    Subscription.query.filter_by(order_id=o.id).delete(synchronize_session=False)
-    CouponUsage.query.filter_by(order_id=o.id).delete(synchronize_session=False)
-    db.session.delete(o)
-    db.session.commit()
-    audit("Order deleted", public_label)
-    db.session.commit()
-    flash(f"{public_label} was permanently removed.")
+    public_label = public_order_ref(o)
+    try:
+        # Detach every known child record before deleting the parent order.
+        # This is deliberately explicit for PostgreSQL foreign-key safety.
+        if "V21Ticket" in globals():
+            V21Ticket.query.filter_by(order_id=o.id).update({V21Ticket.order_id: None}, synchronize_session=False)
+        OrderDelivery.query.filter_by(order_id=o.id).delete(synchronize_session=False)
+        Subscription.query.filter_by(order_id=o.id).delete(synchronize_session=False)
+        CouponUsage.query.filter_by(order_id=o.id).update({CouponUsage.order_id: None}, synchronize_session=False)
+        db.session.flush()
+        db.session.delete(o)
+        db.session.flush()
+        db.session.commit()
+        audit("Order deleted", public_label)
+        db.session.commit()
+        flash(f"{public_label} was permanently removed.")
+    except Exception as exc:
+        db.session.rollback()
+        app.logger.exception("Order delete failed for %s", order_id)
+        flash(f"Could not delete {public_label}: {exc}")
     return redirect(url_for("admin") + "#orders")
 
 @app.route("/admin/order/<int:order_id>/<status>", methods=["POST"])
@@ -2791,6 +2861,35 @@ def v21_context():
     return {"v21_tr": v21_tr, "v21_json": v21_json, "v21_billing": v21_billing, "v21_meta": v21_meta, "v21_discount": v21_discount, "v21_badges": v21_badges, "v21_unread": unread}
 
 # New storefront endpoints are separate so legacy payment/order URLs remain untouched.
+@app.route("/bundle/<int:bundle_id>")
+def bundle_view(bundle_id):
+    bundle=db.session.get(Bundle,bundle_id)
+    if not bundle or not bundle.active:return ("Not found",404)
+    items=[x for x in bundle.items if x.plan and x.plan.active and x.plan.product and x.plan.product.active]
+    original=sum((x.plan.sale_price if x.plan.sale_price is not None else x.plan.price)*x.quantity for x in items)
+    return render_template("v21_bundle.html",bundle=bundle,items=items,original=original)
+
+@app.route("/manifest.webmanifest")
+def manifest_webmanifest():
+    return Response(json.dumps({"name":"VEYRA","short_name":"VEYRA","start_url":"/","display":"standalone","background_color":"#111a36","theme_color":"#111a36","description":"Digital marketplace","icons":[{"src":"/static/logos/VEYRA-logo-transparent.png","sizes":"512x512","type":"image/png"}]}),mimetype="application/manifest+json")
+
+@app.route("/service-worker.js")
+def service_worker():
+    return Response("const CACHE='veyra-v1';self.addEventListener('install',e=>e.waitUntil(caches.open(CACHE).then(c=>c.addAll(['/','/manifest.webmanifest']))));self.addEventListener('fetch',e=>{if(e.request.method!=='GET')return;e.respondWith(fetch(e.request).catch(()=>caches.match(e.request)));});",mimetype="application/javascript")
+
+@app.route("/robots.txt")
+def robots_txt():
+    return Response("User-agent: *\nAllow: /\nDisallow: /admin\nDisallow: /account\nDisallow: /v21/\n",mimetype="text/plain")
+
+@app.route("/sitemap.xml")
+def sitemap_xml():
+    root=request.url_root.rstrip('/')
+    urls=[root,root+'/categories']
+    urls += [root+'/product/'+p.slug for p in Product.query.filter_by(active=True).all()]
+    urls += [root+'/bundle/'+str(b.id) for b in Bundle.query.filter_by(active=True).all()]
+    body='<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'+''.join('<url><loc>'+u+'</loc></url>' for u in urls)+'</urlset>'
+    return Response(body,mimetype="application/xml")
+
 @app.route("/v21/search")
 def v21_search():
     q=request.args.get("q","").strip().lower()
@@ -2987,8 +3086,12 @@ def admin_v21_ticket_reply(ticket_id):
 
 # Use the v2.1 storefront/dashboard while preserving legacy route endpoints for checkout/payment.
 def v21_index():
-    products=Product.query.filter_by(active=True).order_by(Product.sort_order,Product.id).all();categories=Category.query.order_by(Category.name).all();deals=[d for d in V21Deal.query.order_by(V21Deal.created_at.desc()).all() if v21_deal_active(d)];recent=v21_recent()
-    return render_template("v21_index.html",products=products,categories=categories,deals=deals,recent=recent)
+    products=Product.query.filter_by(active=True).order_by(Product.sort_order,Product.id).all()
+    categories=Category.query.order_by(Category.name).all()
+    bundles=Bundle.query.filter_by(active=True).order_by(Bundle.featured.desc(),Bundle.name).all()
+    deals=[d for d in V21Deal.query.order_by(V21Deal.created_at.desc()).all() if v21_deal_active(d)]
+    recent=v21_recent()
+    return render_template("v21_index.html",products=products,categories=categories,deals=deals,bundles=bundles,recent=recent)
 
 def v21_product(slug):
     p=Product.query.filter_by(slug=slug,active=True).first_or_404();v21_touch(p);reviews=Review.query.filter_by(product_id=p.id,approved=True).order_by(Review.created_at.desc()).all();meta=v21_meta(p);included=v21_json(meta.included_json,[]);faq=v21_json(meta.faq_json,[]);plans=sorted([x for x in p.plans if x.active],key=lambda x:x.sort_order);saved=current_user.is_authenticated and Wishlist.query.filter_by(user_id=current_user.id,product_id=p.id).first() is not None
