@@ -74,10 +74,10 @@
           <label class="wide">{{tr('Full description')}}<textarea name="description" rows="4" placeholder="Write the full product description. You can use multiple lines."></textarea></label>
           <label>Logo / image URL<input name="image_url" placeholder="https://..."></label>
           <label>Upload logo<input type="file" name="image_file" accept="image/png,image/jpeg,image/webp,image/svg+xml"></label>
-          <label>Price display<select name="price_label_type" onchange="this.nextElementSibling.hidden=this.value!=='custom'">
-            <option value="month">month</option><option value="year">year</option><option value="subscription">subscription</option><option value="one-time">one-time</option><option value="custom">Custom</option>
+          <label>Storefront price label<select name="price_label_type" onchange="this.nextElementSibling.hidden=this.value!=='custom'">
+            <option value="month">Per month</option><option value="year">Per year</option><option value="subscription">Subscription</option><option value="one-time">One-time</option><option value="custom">Custom label</option>
           </select></label>
-          <label class="price-label-custom" hidden>Custom label<input name="price_label_custom" placeholder="e.g. / lifetime"></label>
+          <label class="price-label-custom" hidden>Custom label<input name="price_label_custom" placeholder="e.g. lifetime, / lifetime, per device"></label>
           <label>Months<input name="months" type="number" min="1" value="1"></label>
           <label>Public price (€)<input name="price" type="number" min="0" step="0.01" value="0"></label>
           <label>Sale price (€)<input name="sale_price" type="number" min="0" step="0.01" placeholder="Optional"></label>
@@ -139,15 +139,15 @@
           <label class="wide">{{tr('Full description')}}<textarea name="description" rows="4" placeholder="Full description — multiple lines supported.">{{p.description}}</textarea></label>
               <label>Logo / image URL<input name="image_url" value="{{p.image_url}}"></label>
               <label>Replace logo<input type="file" name="image_file" accept="image/png,image/jpeg,image/webp,image/svg+xml"></label>
-              <label>Price display<select name="price_label_type" onchange="this.nextElementSibling.hidden=this.value!=='custom'">
+              <label>Storefront price label<select name="price_label_type" onchange="this.nextElementSibling.hidden=this.value!=='custom'">
                 {% set lbl=p.price_label or 'month' %}
-                <option value="month" {% if lbl=='month' %}selected{% endif %}>month</option>
-                <option value="year" {% if lbl=='year' %}selected{% endif %}>year</option>
-                <option value="subscription" {% if lbl=='subscription' %}selected{% endif %}>subscription</option>
-                <option value="one-time" {% if lbl=='one-time' %}selected{% endif %}>one-time</option>
-                <option value="custom" {% if lbl not in ['month','year','subscription','one-time'] %}selected{% endif %}>Custom</option>
+                <option value="month" {% if lbl=='month' %}selected{% endif %}>Per month</option>
+                <option value="year" {% if lbl=='year' %}selected{% endif %}>Per year</option>
+                <option value="subscription" {% if lbl=='subscription' %}selected{% endif %}>Subscription</option>
+                <option value="one-time" {% if lbl=='one-time' %}selected{% endif %}>One-time</option>
+                <option value="custom" {% if lbl not in ['month','year','subscription','one-time'] %}selected{% endif %}>Custom label</option>
               </select></label>
-              <label class="price-label-custom" {% if lbl in ['month','year','subscription','one-time'] %}hidden{% endif %}>Custom label<input name="price_label_custom" value="{% if lbl not in ['month','year','subscription','one-time'] %}{{lbl}}{% endif %}" placeholder="e.g. lifetime"></label>
+              <label class="price-label-custom" {% if lbl in ['month','year','subscription','one-time'] %}hidden{% endif %}>Custom label<input name="price_label_custom" value="{% if lbl not in ['month','year','subscription','one-time'] %}{{lbl}}{% endif %}" placeholder="e.g. lifetime, per device"></label>
               <label class="check-line"><input type="checkbox" name="active" {% if p.active %}checked{% endif %}> Visible</label>
               <label class="check-line"><input type="checkbox" name="featured" {% if p.featured %}checked{% endif %}> Featured</label>
               <div class="form-submit"><button class="soft-btn">{{tr('Save product')}}</button></div>
