@@ -2964,6 +2964,24 @@ def v21_billing(months):
     if months <= 0: return "one-time"
     return f"/{months} months"
 
+def v21_price_label(product, plan=None):
+    """Return the storefront billing label configured for the product.
+    Product.price_label is the source of truth; plan months are only a fallback
+    for older products that do not yet have an explicit label.
+    """
+    label = (getattr(product, "price_label", None) or "").strip()
+    if not label:
+        return v21_billing(getattr(plan, "months", 1) if plan is not None else 1)
+    if label == "one-time":
+        return "one-time"
+    if label == "subscription":
+        return "subscription"
+    if label.startswith("/"):
+        return label
+    if label in {"month", "year"}:
+        return "/" + label
+    return label
+
 def v21_plan_price(plan):
     return float(plan.sale_price if plan.sale_price is not None else plan.price)
 
@@ -3025,7 +3043,7 @@ def v21_payment_methods():
 @app.context_processor
 def v21_context():
     unread = V21Notification.query.filter_by(user_id=current_user.id, read=False).count() if current_user.is_authenticated else 0
-    return {"v21_tr": v21_tr, "v21_json": v21_json, "v21_billing": v21_billing, "v21_meta": v21_meta, "v21_discount": v21_discount, "v21_badges": v21_badges, "v21_unread": unread}
+    return {"v21_tr": v21_tr, "v21_json": v21_json, "v21_billing": v21_billing, "v21_price_label": v21_price_label, "v21_meta": v21_meta, "v21_discount": v21_discount, "v21_badges": v21_badges, "v21_unread": unread}
 
 # New storefront endpoints are separate so legacy payment/order URLs remain untouched.
 @app.route("/bundle/<int:bundle_id>")
