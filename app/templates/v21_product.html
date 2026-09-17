@@ -1,6 +1,54 @@
 {% extends "base.html" %}{% block content %}
 <div class="v21-detail"><a class="v21-back" href="/#products">← {{tr('Back to products')}}</a><div class="v21-producttop"><div class="v21-detail-art">{% for b in v21_badges(product,plans[0] if plans else none)[:4] %}<span>{{b}}</span>{% endfor %}<div class="v21-detail-logo">{% if product_logo(product) %}<img src="{{product_logo(product)}}" alt="{{product.name}}">{% else %}{{product.name[:1]}}{% endif %}</div></div><div class="v21-detail-copy"><span class="v21-kicker">{{product.category.name}} · {{meta.product_type}}</span><h1>{{product.name}}</h1><p class="v21-description">{{meta.desc_i18n and (v21_json(meta.desc_i18n,{}).get(session.get('lang','en')) or product.description) or product.description}}</p><div class="v21-meta-grid"><div><small>{{v21_tr('Region')}}</small><b>{{meta.region}}</b></div><div><small>{{v21_tr('Delivery')}}</small><b>{{meta.delivery}}</b></div><div><small>{{v21_tr('Guarantee')}}</small><b>{{meta.guarantee}}</b></div><div><small>{{v21_tr("What you receive")}}</small><b>{{v21_tr(meta.receive_type)}}</b></div></div><div class="v21-receive"><span>{{v21_tr("WHAT YOU RECEIVE")}}</span><strong>{{v21_tr(meta.receive_type)}}</strong><small>{{v21_tr('This is shown before checkout so you know exactly what you are buying.')}}</small></div>{% if current_user.is_authenticated %}<form method="post" action="/v21/wishlist/{{product.id}}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="v21-btn ghost">{{'♥ Saved' if saved else '♡ Add to wishlist'}}</button></form>{% endif %}</div></div>
-<section class="v21-planbox"><div class="v21-sectiontitle"><span>{{v21_tr('Pricing')}}</span><h2>{{tr('Choose your plan')}}</h2></div>{% for plan in plans %}<div class="v21-plan"><div><b>{{plan.name}}</b><span>{{v21_plan_term(plan)}} · {{v21_tr(meta.receive_type)}}</span>{% if v21_discount(plan)>0 %}<em>-{{v21_discount(plan)}}%</em>{% endif %}</div><div class="v21-planprice">{% if plan.sale_price is not none %}<del>€{{'%.2f'|format(plan.price)}}</del>{% endif %}<strong>€{{'%.2f'|format(plan.sale_price if plan.sale_price is not none else plan.price)}}</strong><small>{{v21_price_label(product, plan)}}</small></div><div class="v21-planbuy">{% if current_user.is_authenticated %}<form method="post" action="/order/{{plan.id}}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input name="coupon" placeholder="{{tr('Coupon')}}"><button class="v21-btn primary">{{v21_tr('Buy Now')}} →</button></form>{% else %}<a class="v21-btn primary" href="/login">{{tr('Login to order')}}</a>{% endif %}</div></div>{% else %}<p>{{v21_tr('No products found')}}</p>{% endfor %}</section>
+<section class="v21-planbox v21-plan-selector" data-product-id="{{product.id}}">
+<div class="v21-sectiontitle"><span>{{v21_tr('Pricing')}}</span><h2>{{tr('Choose your plan')}}</h2></div>
+{% if plans %}
+<div class="v21-plan-tabs" role="tablist" aria-label="{{tr('Choose your plan')}}">
+{% for plan in plans %}<button type="button" class="v21-plan-tab{% if loop.first %} active{% endif %}" data-plan-id="{{plan.id}}" data-plan-name="{{plan.name|e}}" data-plan-term="{{v21_plan_term(plan)|e}}" data-plan-price="{{'%.2f'|format(plan.sale_price if plan.sale_price is not none else plan.price)}}" data-plan-old="{{'%.2f'|format(plan.price)}}" data-plan-label="{{v21_price_label(product, plan)|e}}" data-plan-discount="{{v21_discount(plan)}}" data-plan-receive="{{v21_tr(meta.receive_type)|e}}" aria-selected="{{'true' if loop.first else 'false'}}">{{v21_plan_term(plan).replace(' months',' mo').replace(' month',' mo')}}</button>{% endfor %}
+</div>
+<div class="v21-selected-plan">
+  <div class="v21-selected-copy">
+    <small>{{v21_tr('Selected plan')}}</small>
+    <h3 id="v21SelectedPlanName">{{plans[0].name}}</h3>
+    <p><span id="v21SelectedPlanTerm">{{v21_plan_term(plans[0])}}</span> · {{v21_tr(meta.receive_type)}}</p>
+    <em id="v21SelectedDiscount"{% if v21_discount(plans[0]) <= 0 %} style="display:none"{% endif %}>-{{v21_discount(plans[0])}}%</em>
+  </div>
+  <div class="v21-selected-price">
+    {% if plans[0].sale_price is not none %}<del id="v21SelectedOld">€{{'%.2f'|format(plans[0].price)}}</del>{% else %}<del id="v21SelectedOld" style="display:none"></del>{% endif %}
+    <strong id="v21SelectedPrice">€{{'%.2f'|format(plans[0].sale_price if plans[0].sale_price is not none else plans[0].price)}}</strong>
+    <small id="v21SelectedLabel">{{v21_price_label(product, plans[0])}}</small>
+  </div>
+</div>
+<div class="v21-selected-buy">
+{% if current_user.is_authenticated %}
+<form id="v21SelectedOrderForm" method="post" action="/order/{{plans[0].id}}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input name="coupon" placeholder="{{tr('Coupon')}}"><button class="v21-btn primary" type="submit">{{v21_tr('Buy Now')}} →</button></form>
+{% else %}
+<a id="v21SelectedLogin" class="v21-btn primary" href="/login">{{tr('Login to order')}}</a>
+{% endif %}
+</div>
+{% else %}<p>{{v21_tr('No products found')}}</p>{% endif %}
+</section>
+<script>
+(function(){
+  const box=document.querySelector('.v21-plan-selector'); if(!box) return;
+  const tabs=[...box.querySelectorAll('.v21-plan-tab')];
+  const name=document.getElementById('v21SelectedPlanName'), term=document.getElementById('v21SelectedPlanTerm');
+  const price=document.getElementById('v21SelectedPrice'), old=document.getElementById('v21SelectedOld'), label=document.getElementById('v21SelectedLabel');
+  const discount=document.getElementById('v21SelectedDiscount'), form=document.getElementById('v21SelectedOrderForm');
+  const login=document.getElementById('v21SelectedLogin');
+  function select(tab){
+    tabs.forEach(t=>{const on=t===tab;t.classList.toggle('active',on);t.setAttribute('aria-selected',on?'true':'false');});
+    name.textContent=tab.dataset.planName; term.textContent=tab.dataset.planTerm; price.textContent='€'+tab.dataset.planPrice;
+    label.textContent=tab.dataset.planLabel;
+    const oldPrice=parseFloat(tab.dataset.planOld), current=parseFloat(tab.dataset.planPrice);
+    if(old && oldPrice>current){old.style.display='block';old.textContent='€'+oldPrice.toFixed(2);} else if(old){old.style.display='none';old.textContent='';}
+    if(discount){const d=parseInt(tab.dataset.planDiscount||'0',10);discount.style.display=d>0?'inline-block':'none';discount.textContent='-'+d+'%';}
+    if(form) form.action='/order/'+tab.dataset.planId;
+    if(login) login.href='/login?next='+encodeURIComponent('/order/'+tab.dataset.planId);
+  }
+  tabs.forEach(t=>t.addEventListener('click',()=>select(t)));
+})();
+</script>
 <div class="v21-two"><section class="v21-panel"><span>{{v21_tr("What's included")}}</span><h2>{{v21_tr("Everything you need")}}</h2><ul>{% for x in included %}<li>✓ {{x}}</li>{% else %}<li>✓ {{v21_tr(meta.receive_type)}}</li><li>✓ {{meta.delivery}}</li><li>✓ {{meta.guarantee}}</li>{% endfor %}</ul></section><section class="v21-panel"><span>{{v21_tr('FAQ')}}</span><h2>{{v21_tr("Questions")}}</h2>{% for x in faq %}<details><summary>{{x.q}}</summary><p>{{x.a}}</p></details>{% else %}<details open><summary>{{v21_tr('How is delivery handled?')}}</summary><p>{{meta.delivery}}. You can also contact support from your dashboard.</p></details><details><summary>{{v21_tr('What type of access is this?')}}</summary><p>{{v21_tr(meta.receive_type)}}.</p></details>{% endfor %}</section></div>
 
 <section class="v21-panel veyra-trust-panel"><span>{{v21_tr('Trust')}}</span><h2>{{v21_tr('VEYRA Guarantee & Support')}}</h2><p class="muted">{{v21_tr('If something goes wrong with your purchase, contact us and we will review the issue according to our Guarantee Policy.')}}</p><div class="veyra-trust-grid"><div><b>🛡️ {{v21_tr('Product Guarantee')}}</b><small>{{meta.guarantee}}</small></div><div><b>🔄 {{v21_tr('Replacement Support')}}</b><small>{{v21_tr('Eligible products may be replaced when the issue is covered by our Guarantee Policy.')}}</small></div><div><b>💬 {{v21_tr('Customer Support')}}</b><small>{{v21_tr('We are here to help before and after your purchase.')}}</small></div></div></section>
