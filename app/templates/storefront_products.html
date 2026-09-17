@@ -1,6 +1,53 @@
 {% extends "base.html" %}{% block content %}
 <section class="store-page-head"><div><span class="store-kicker">SHOP</span><h1>{{tr('Products')}}</h1><p>{{tr('Explore all available digital products and choose the plan that fits you.')}}</p></div><div class="store-search"><span>⌕</span><input id="storeSearch" value="{{initial_search|default('')}}" placeholder="{{tr('Search products...')}}"></div></section>
 <section class="store-toolbar"><div class="store-cats"><button class="store-filter active" data-cat="all">{{tr('All')}}</button>{% for c in categories %}<button class="store-filter" data-cat="{{c.slug}}">{{c.name}}</button>{% endfor %}</div><span id="storeCount"></span></section>
-<section class="store-grid" id="storeGrid">{% for p in products %}{% set plans=p.plans|selectattr('active')|list|sort(attribute='sort_order') %}{% set pl=plans[0] if plans else none %}
-<article class="store-product-card" data-name="{{p.name|lower}} {{v21_meta(p).keywords|lower}}" data-cat="{{p.category.slug}}"><a class="store-art" href="/product/{{p.slug}}">{% if product_logo(p) %}<img src="{{product_logo(p)}}" alt="{{p.name}}">{% else %}<b>{{p.name[:1]}}</b>{% endif %}</a><div class="store-card-body"><small>{{p.category.name}} · {{v21_meta(p).product_type}}</small><h3>{{p.name}}</h3><p>{{v21_meta(p).receive_type}} · {{v21_meta(p).region}}</p>{% if pl %}<div class="store-price">{% if pl.sale_price is not none %}<del>€{{'%.2f'|format(pl.price)}}</del><em>-{{v21_discount(pl)}}%</em>{% endif %}<strong>€{{'%.2f'|format(pl.sale_price if pl.sale_price is not none else pl.price)}}</strong><span>{{v21_price_label(p, pl)}}</span></div>{% endif %}<a class="v21-btn primary store-view" href="/product/{{p.slug}}">{{tr('View product')}} →</a></div></article>{% endfor %}</section><div id="storeEmpty" class="store-empty" hidden>{{tr('No products found')}}</div>
-<script>(()=>{const cards=[...document.querySelectorAll('.store-product-card')],q=document.getElementById('storeSearch'),empty=document.getElementById('storeEmpty'),count=document.getElementById('storeCount');let cat='all';function go(){let s=(q.value||'').toLowerCase().trim(),n=0;cards.forEach(c=>{let ok=(!s||c.dataset.name.includes(s))&&(cat==='all'||c.dataset.cat===cat);c.hidden=!ok;if(ok)n++});empty.hidden=n>0;count.textContent=n+' {{tr("products")}}'}document.querySelectorAll('.store-filter').forEach(b=>b.onclick=()=>{cat=b.dataset.cat;document.querySelectorAll('.store-filter').forEach(x=>x.classList.remove('active'));b.classList.add('active');go()});q.oninput=go;go()})()</script>{% endblock %}
+<section class="store-grid" id="storeGrid">
+{% for p in products %}
+  {% set plans=p.plans|selectattr('active')|list|sort(attribute='sort_order') %}
+  {% set pl=plans[0] if plans else none %}
+  <article class="store-product-card" data-name="{{p.name|lower}} {{v21_meta(p).keywords|lower}}" data-cat="{{p.category.slug}}">
+    <a class="store-art" href="/product/{{p.slug}}">{% if product_logo(p) %}<img src="{{product_logo(p)}}" alt="{{p.name}}">{% else %}<b>{{p.name[:1]}}</b>{% endif %}</a>
+    <div class="store-card-body">
+      <small>{{p.category.name}} · {{v21_meta(p).product_type}}</small>
+      <h3>{{p.name}}</h3>
+      <p>{{v21_meta(p).receive_type}} · {{v21_meta(p).region}}</p>
+      {% if plans %}
+      <div class="store-plan-tabs" role="tablist" aria-label="{{tr('Choose your plan')}}">
+        {% for plan in plans %}
+        <button type="button" class="store-plan-tab{% if loop.first %} active{% endif %}" data-plan-id="{{plan.id}}" data-plan-name="{{plan.name|e}}" data-plan-term="{{v21_plan_term(plan)|e}}" data-plan-price="{{'%.2f'|format(plan.sale_price if plan.sale_price is not none else plan.price)}}" data-plan-old="{{'%.2f'|format(plan.price)}}" data-plan-label="{{v21_price_label(p, plan)|e}}" data-plan-discount="{{v21_discount(plan)}}" aria-selected="{{'true' if loop.first else 'false'}}">{{v21_plan_term(plan).replace(' months',' mo').replace(' month',' mo').replace('12 mo','12 mo')}}</button>
+        {% endfor %}
+      </div>
+      <div class="store-plan-meta" data-selected-term>{{v21_plan_term(pl)}} · {{v21_tr(v21_meta(p).receive_type)}}</div>
+      <div class="store-price">
+        {% if pl.sale_price is not none %}<del class="store-old">€{{'%.2f'|format(pl.price)}}</del>{% endif %}
+        <em class="store-discount"{% if v21_discount(pl) <= 0 %} style="display:none"{% endif %}>-{{v21_discount(pl)}}%</em>
+        <strong data-selected-price>€{{'%.2f'|format(pl.sale_price if pl.sale_price is not none else pl.price)}}</strong>
+        <span class="store-billing" data-selected-label>{{v21_price_label(p, pl)}}</span>
+      </div>
+      {% endif %}
+      <a class="v21-btn primary store-view" href="/product/{{p.slug}}">{{tr('View product')}} →</a>
+    </div>
+  </article>
+{% endfor %}
+</section>
+<div id="storeEmpty" class="store-empty" hidden>{{tr('No products found')}}</div>
+<script>
+(()=>{
+  const cards=[...document.querySelectorAll('.store-product-card')],q=document.getElementById('storeSearch'),empty=document.getElementById('storeEmpty'),count=document.getElementById('storeCount');let cat='all';
+  const money=v=>'€'+Number(v).toFixed(2);
+  const shortTerm=t=>String(t||'').replace(/12 months?/i,'12 mo').replace(/months?/i,m=>m.toLowerCase()==='month'?'mo':'mo');
+  function selectPlan(card,tab){
+    card.querySelectorAll('.store-plan-tab').forEach(t=>{const on=t===tab;t.classList.toggle('active',on);t.setAttribute('aria-selected',on?'true':'false')});
+    const price=card.querySelector('[data-selected-price]'),old=card.querySelector('.store-old'),label=card.querySelector('[data-selected-label]'),meta=card.querySelector('[data-selected-term]'),disc=card.querySelector('.store-discount');
+    const now=Number(tab.dataset.planPrice),was=Number(tab.dataset.planOld),d=Number(tab.dataset.planDiscount||0);
+    if(price) price.textContent=money(now); if(label) label.textContent=tab.dataset.planLabel||'';
+    if(meta) meta.textContent=(tab.dataset.planTerm||'')+' · '+(meta.textContent.split('·').slice(1).join('·').trim()||'');
+    if(old){old.style.display=was>now?'inline':'none';old.textContent=was>now?money(was):''}
+    if(disc){disc.style.display=d>0?'inline-block':'none';disc.textContent='-'+d+'%'}
+  }
+  cards.forEach(card=>{const tabs=[...card.querySelectorAll('.store-plan-tab')];tabs.forEach(t=>t.addEventListener('click',()=>selectPlan(card,t)))});
+  function go(){let s=(q.value||'').toLowerCase().trim(),n=0;cards.forEach(c=>{let ok=(!s||c.dataset.name.includes(s))&&(cat==='all'||c.dataset.cat===cat);c.hidden=!ok;if(ok)n++});empty.hidden=n>0;count.textContent=n+' {{tr("products")}}'}
+  document.querySelectorAll('.store-filter').forEach(b=>b.onclick=()=>{cat=b.dataset.cat;document.querySelectorAll('.store-filter').forEach(x=>x.classList.remove('active'));b.classList.add('active');go()});q.oninput=go;go();
+})();
+</script>
+{% endblock %}
