@@ -1,5 +1,0 @@
-{% extends "base.html" %}{% block content %}
-<section class="vx-page-hero"><span>SHOP</span><h1>{{tr('Categories')}}</h1><p>{{tr('Browse VEYRA products by category.')}}</p></section>
-<section class="vx-category-page">
-{% for c in categories %}{% set cps=products|selectattr('category_id','equalto',c.id)|list %}{% if cps %}<section class="vx-category-section" id="{{c.slug}}"><div class="vx-category-head"><div><span>{{cps|length}} {{tr('products')}}</span><h2>{{tr(c.name)}}</h2></div><a href="/products">{{tr('View products')}} →</a></div><div class="vx-category-grid">{% for p in cps %}{% set plans=p.plans|selectattr('active')|list|sort(attribute='sort_order')|list %}{% set pl=plans[0] if plans else none %}<a class="vx-category-product" href="/product/{{p.slug}}"><div>{% if product_logo(p) %}<img src="{{product_logo(p)}}" alt="{{p.name}}">{% else %}<b>{{p.name[:1]}}</b>{% endif %}</div><strong>{{p.name}}</strong>{% if pl %}<small>€{{'%.2f'|format(pl.sale_price if pl.sale_price is not none else pl.price)}} · {{v21_billing(pl.months)}}</small>{% endif %}</a>{% endfor %}</div></section>{% endif %}{% endfor %}
-</section>{% endblock %}
