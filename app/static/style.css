@@ -280,3 +280,23 @@ body[data-theme="dark"] .vx-home-hero,body[data-theme="dark"] .vx-home-card,body
 body[data-theme="dark"] .vx-home-art,body[data-theme="dark"] .vx-category-product>div{background:#172540}
 body[data-theme="glass"] .vx-home-hero,body[data-theme="glass"] .vx-home-product,body[data-theme="glass"] .vx-home-cat,body[data-theme="glass"] .vx-home-trustband,body[data-theme="glass"] .vx-category-product{background:rgba(255,255,255,.55);backdrop-filter:blur(18px)}
 body[data-theme="neon"] .vx-home-hero{background:radial-gradient(circle at 80% 20%,rgba(255,60,180,.18),transparent 30%),linear-gradient(135deg,#fff,#f7f0ff)}
+
+/* V12 product plan selector */
+.v21-plan-tabs{display:flex;gap:8px;flex-wrap:wrap;padding:4px 0 18px;border-bottom:1px solid var(--v21-line)}
+.v21-plan-tab{border:1px solid var(--v21-line);background:#f4f6fb;color:var(--v21-text);border-radius:999px;padding:9px 16px;font-weight:800;cursor:pointer;transition:.18s}
+.v21-plan-tab:hover{transform:translateY(-1px);border-color:#b9c1d6}
+.v21-plan-tab.active{background:#151824;color:#fff;border-color:#151824;box-shadow:0 7px 18px rgba(21,24,36,.14)}
+.v21-selected-plan{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:24px 0 18px}
+.v21-selected-copy small{display:block;color:var(--v21-muted);font-size:10px;text-transform:uppercase;letter-spacing:.12em;font-weight:800}
+.v21-selected-copy h3{margin:6px 0 5px;font-size:22px}
+.v21-selected-copy p{margin:0;color:var(--v21-muted);font-size:13px}
+.v21-selected-copy em{display:inline-block;margin-top:10px;font-style:normal;font-size:10px;background:#e8faf6;color:#087d69;padding:5px 8px;border-radius:8px;font-weight:800}
+.v21-selected-price{text-align:right;white-space:nowrap}
+.v21-selected-price del,.v21-selected-price strong,.v21-selected-price small{display:block}
+.v21-selected-price del{font-size:12px;color:var(--v21-muted)}
+.v21-selected-price strong{font-size:34px;line-height:1.05}
+.v21-selected-price small{margin-top:4px;color:var(--v21-muted);font-size:12px}
+.v21-selected-buy{border-top:1px solid var(--v21-line);padding-top:18px}
+.v21-selected-buy form{display:flex;gap:8px;max-width:520px}
+.v21-selected-buy input{flex:1;min-width:0;border:1px solid var(--v21-line);border-radius:11px;padding:11px 12px;background:#fff}
+@media(max-width:680px){.v21-selected-plan{align-items:flex-start}.v21-selected-copy h3{font-size:18px}.v21-selected-price strong{font-size:28px}.v21-selected-buy form{flex-direction:column}.v21-selected-buy .v21-btn{width:100%}}
